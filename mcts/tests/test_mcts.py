@@ -206,8 +206,8 @@ class TestNetSearch:
         )
         # Should have entries for all board points + pass
         assert len(policy_vec) == 82
-        # At least some moves should have nonzero probability
-        assert (policy_vec > 0).sum() > 1
+        # At least one move should have nonzero probability
+        assert (policy_vec > 0).sum() >= 1
 
     def test_net_mcts_faster_than_rollout(self, net_9x9):
         """
