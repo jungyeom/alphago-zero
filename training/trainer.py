@@ -239,7 +239,15 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
         # 1. Generate self-play games
         print("\n  Phase 1: Self-play")
         sp_start = time.time()
-        games = generate_self_play_data(net, config, device)
+        if config.use_parallel_self_play and config.num_parallel_games > 1:
+            from training.parallel_self_play import generate_parallel_self_play
+            print(f"  (parallel: {config.num_parallel_games} games batched)")
+            games = generate_parallel_self_play(
+                net, config, device,
+                num_parallel=config.num_parallel_games,
+            )
+        else:
+            games = generate_self_play_data(net, config, device)
         sp_time = time.time() - sp_start
 
         # 2. Add to replay buffer
