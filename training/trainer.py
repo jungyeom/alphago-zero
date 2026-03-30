@@ -340,6 +340,8 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--use-cpp", action="store_true", default=False,
                         help="Use C++ board engine (run ./build_cpp.sh first)")
+    parser.add_argument("--parallel-games", type=int, default=16,
+                        help="Number of simultaneous self-play games (default: 16, try 64-128 on GPU)")
     args = parser.parse_args()
 
     config = TrainingConfig(
@@ -351,6 +353,7 @@ if __name__ == "__main__":
         learning_rate=args.lr,
         device=args.device,
         use_cpp=args.use_cpp,
+        num_parallel_games=args.parallel_games,
     )
 
     train(config, resume_from=args.resume)

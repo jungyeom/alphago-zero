@@ -145,6 +145,7 @@ uv run python -m training.trainer \
   --num-iterations 100 \
   --games-per-iter 50 \
   --simulations 150 \
+  --parallel-games 128 \
   --use-cpp \
   --device cuda 2>&1 | tee training.log
 
@@ -152,23 +153,25 @@ uv run python -m training.trainer \
 # Reattach later: tmux attach -t train
 ```
 
+The `--parallel-games` flag controls how many self-play games run simultaneously, batching their GPU evaluations together. Higher values = better GPU utilization. Recommended: 64-128 on GPU, 4-16 on CPU.
+
 Other training configs:
 
 ```bash
 # Budget-conscious (~$3-5)
 uv run python -m training.trainer \
   --board-size 13 --num-iterations 50 --games-per-iter 30 \
-  --simulations 100 --use-cpp --device cuda
+  --simulations 100 --parallel-games 64 --use-cpp --device cuda
 
 # Stronger model (~$10-17)
 uv run python -m training.trainer \
   --board-size 13 --num-iterations 200 --games-per-iter 100 \
-  --simulations 200 --use-cpp --device cuda
+  --simulations 200 --parallel-games 128 --use-cpp --device cuda
 
 # 9x9 (faster, good for experimentation)
 uv run python -m training.trainer \
   --board-size 9 --num-iterations 150 --games-per-iter 80 \
-  --simulations 150 --use-cpp --device cuda
+  --simulations 150 --parallel-games 128 --use-cpp --device cuda
 ```
 
 ### Step 4: Monitor training
@@ -205,7 +208,7 @@ If the instance stops (spot reclaimed, SSH drops, etc.), your checkpoints are sa
 # Resume from the latest checkpoint
 uv run python -m training.trainer \
   --resume checkpoints/model_iter_0050.pt \
-  --use-cpp --device cuda
+  --parallel-games 128 --use-cpp --device cuda
 ```
 
 Checkpoints are saved every 5 iterations (~5MB each). At most you lose the current in-progress iteration.
