@@ -16,7 +16,7 @@ from training.config import TrainingConfig
 
 # Try to import C++ MCTS
 try:
-    from mcts.cpp_search import get_move_probabilities_cpp
+    from mcts.cpp_search import get_move_probabilities_cpp, get_move_probabilities_parallel_cpp
     _HAS_CPP_MCTS = True
 except (ImportError, RuntimeError):
     _HAS_CPP_MCTS = False
@@ -64,16 +64,19 @@ def play_self_play_game(
         features = board_to_features(game.board, color)
 
         # Run MCTS to get improved policy
-        if use_cpp and _HAS_CPP_MCTS:
-            move_probs, policy_vec = get_move_probabilities_cpp(
+        num_threads = getattr(config, 'num_search_threads', 1)
+        if use_cpp and _HAS_CPP_MCTS and num_threads > 1:
+            # Multi-threaded C++ MCTS with virtual loss + GPU batch queue
+            move_probs, policy_vec = get_move_probabilities_parallel_cpp(
                 game.board,
                 color,
                 net,
                 num_simulations=config.num_simulations,
+                num_threads=num_threads,
                 temperature=temperature,
                 device=device,
             )
-        else:
+        elif use_cpp and _HAS_CPP_MCTS:
             move_probs, policy_vec = get_move_probabilities_with_net(
                 game.board,
                 color,

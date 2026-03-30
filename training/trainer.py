@@ -342,6 +342,8 @@ if __name__ == "__main__":
                         help="Use C++ board engine (run ./build_cpp.sh first)")
     parser.add_argument("--parallel-games", type=int, default=16,
                         help="Number of simultaneous self-play games (default: 16, try 64-128 on GPU)")
+    parser.add_argument("--search-threads", type=int, default=1,
+                        help="MCTS threads per game (default: 1, try 4-8 on GPU with --use-cpp)")
     args = parser.parse_args()
 
     config = TrainingConfig(
@@ -354,6 +356,7 @@ if __name__ == "__main__":
         device=args.device,
         use_cpp=args.use_cpp,
         num_parallel_games=args.parallel_games,
+        num_search_threads=args.search_threads,
     )
 
     train(config, resume_from=args.resume)

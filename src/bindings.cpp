@@ -85,7 +85,12 @@ PYBIND11_MODULE(alphago_core, m) {
         .def_readwrite("num_simulations", &MCTSConfig::num_simulations)
         .def_readwrite("c_puct", &MCTSConfig::c_puct)
         .def_readwrite("dirichlet_alpha", &MCTSConfig::dirichlet_alpha)
-        .def_readwrite("dirichlet_weight", &MCTSConfig::dirichlet_weight);
+        .def_readwrite("dirichlet_weight", &MCTSConfig::dirichlet_weight)
+        .def_readwrite("num_threads", &MCTSConfig::num_threads)
+        .def_readwrite("min_batch_size", &MCTSConfig::min_batch_size)
+        .def_readwrite("max_batch_size", &MCTSConfig::max_batch_size)
+        .def_readwrite("batch_timeout_us", &MCTSConfig::batch_timeout_us)
+        .def_readwrite("virtual_loss_value", &MCTSConfig::virtual_loss_value);
 
     // ── MCTS Result ────────────────────────────────────────────────
     py::class_<MCTSResult>(m, "MCTSResult")
@@ -109,7 +114,13 @@ PYBIND11_MODULE(alphago_core, m) {
              py::arg("temperature") = 1.0)
         .def("search_batch", &MCTSSearch::search_batch,
              py::arg("boards"), py::arg("colors"), py::arg("batch_eval_fn"),
-             py::arg("temperature") = 1.0);
+             py::arg("temperature") = 1.0)
+        .def("search_parallel", [](MCTSSearch& self, const Board& board,
+             uint8_t color, const NetBatchEvalFn& fn, double temp) {
+            py::gil_scoped_release release;
+            return self.search_parallel(board, color, fn, temp);
+        }, py::arg("board"), py::arg("color"), py::arg("batch_eval_fn"),
+           py::arg("temperature") = 1.0);
 
     // ── Constants ──────────────────────────────────────────────────
     m.attr("EMPTY") = EMPTY;

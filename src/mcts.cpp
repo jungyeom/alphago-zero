@@ -3,10 +3,11 @@
 #include <cmath>
 #include <algorithm>
 #include <numeric>
+#include <thread>
 
 namespace alphago {
 
-static thread_local std::mt19937 rng(std::random_device{}());
+static thread_local std::mt19937 rng(42 + std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
 MCTSSearch::MCTSSearch(MCTSConfig config) : config_(config) {}
 
@@ -93,10 +94,58 @@ void MCTSSearch::backup(MCTSNode* node, double value) {
         } else if (current->color == WHITE) {
             current->total_value -= value;
         } else {
-            current->total_value += value; // root
+            current->total_value += value;
         }
         current = current->parent;
     }
+}
+
+// ── Virtual Loss Methods (for parallel search) ────────────────────
+// These use the expand_mutex on each node for thread safety.
+// Not lock-free, but correct and simple.
+
+static std::mutex tree_mutex;  // global mutex for tree operations in parallel mode
+
+MCTSNode* MCTSSearch::select_with_virtual_loss(MCTSNode* root) {
+    std::lock_guard<std::mutex> lock(tree_mutex);
+    MCTSNode* current = root;
+    while (current->is_expanded()) {
+        current->virtual_loss_count++;
+        current = current->best_child_puct_vl(config_.c_puct, config_.virtual_loss_value);
+    }
+    current->virtual_loss_count++;
+    return current;
+}
+
+void MCTSSearch::backup_with_virtual_loss(MCTSNode* node, double value) {
+    std::lock_guard<std::mutex> lock(tree_mutex);
+    MCTSNode* current = node;
+    while (current != nullptr) {
+        current->virtual_loss_count--;
+        current->visit_count++;
+        if (current->color == BLACK) {
+            current->total_value += value;
+        } else if (current->color == WHITE) {
+            current->total_value -= value;
+        } else {
+            current->total_value += value;
+        }
+        current = current->parent;
+    }
+}
+
+void MCTSSearch::expand_node_threadsafe(
+    MCTSNode* node,
+    const Board& board,
+    uint8_t color,
+    const std::vector<float>& policy,
+    float value
+) {
+    std::lock_guard<std::mutex> lock(tree_mutex);
+    if (node->is_expanded()) {
+        return;
+    }
+    expand_node(node, board, color, policy, value);
 }
 
 Board MCTSSearch::reconstruct_board(

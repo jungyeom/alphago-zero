@@ -190,3 +190,96 @@ def get_move_probabilities_cpp(
         move_probs.append((None, pass_prob))
 
     return move_probs, policy_vec
+
+
+def search_parallel_cpp(
+    board,
+    color_to_play: int,
+    net: torch.nn.Module,
+    num_simulations: int = 800,
+    num_threads: int = 4,
+    min_batch_size: int = 4,
+    max_batch_size: int = 16,
+    c_puct: float = 1.5,
+    dirichlet_alpha: float = 0.1,
+    dirichlet_weight: float = 0.25,
+    temperature: float = 1.0,
+    device: torch.device | None = None,
+) -> tuple[tuple[int, int] | None, np.ndarray]:
+    """
+    Multi-threaded C++ MCTS with virtual loss and GPU batch queue.
+
+    Multiple C++ threads explore the same tree simultaneously.
+    Leaf evaluations are batched and sent to the GPU together.
+    """
+    if not HAS_CPP:
+        raise RuntimeError("C++ module not available")
+
+    if device is None:
+        device = next(net.parameters()).device
+
+    board_size = board.size if isinstance(board.size, int) else board.size()
+
+    if hasattr(board, '_board'):
+        cboard = board._board
+    else:
+        cboard = ac.CBoard(board_size)
+        grid = board.grid
+        for r in range(board_size):
+            for c in range(board_size):
+                if grid[r, c] != 0:
+                    cboard.play(int(grid[r, c]), ac.board_move(r, c))
+
+    config = ac.MCTSConfig()
+    config.num_simulations = num_simulations
+    config.c_puct = c_puct
+    config.dirichlet_alpha = dirichlet_alpha
+    config.dirichlet_weight = dirichlet_weight
+    config.num_threads = num_threads
+    config.min_batch_size = min_batch_size
+    config.max_batch_size = max_batch_size
+
+    mcts = ac.MCTSSearch(config)
+    batch_eval_fn = _make_batch_eval_fn(net, board_size, device)
+
+    # This releases the GIL internally, runs parallel C++ threads,
+    # evaluator thread acquires GIL for batch_eval_fn calls
+    result = mcts.search_parallel(cboard, color_to_play, batch_eval_fn, temperature)
+
+    move = None if result.best_move.is_pass() else (result.best_move.row, result.best_move.col)
+    policy_vec = np.array(result.policy_vec, dtype=np.float32)
+
+    return move, policy_vec
+
+
+def get_move_probabilities_parallel_cpp(
+    board,
+    color_to_play: int,
+    net: torch.nn.Module,
+    num_simulations: int = 800,
+    num_threads: int = 4,
+    temperature: float = 1.0,
+    device: torch.device | None = None,
+) -> tuple[list[tuple[tuple[int, int] | None, float]], np.ndarray]:
+    """
+    Multi-threaded C++ MCTS returning same format as get_move_probabilities_with_net.
+    """
+    move, policy_vec = search_parallel_cpp(
+        board, color_to_play, net,
+        num_simulations=num_simulations,
+        num_threads=num_threads,
+        temperature=temperature,
+        device=device,
+    )
+
+    board_size = board.size if isinstance(board.size, int) else board.size()
+    move_probs = []
+    for i in range(board_size * board_size):
+        if policy_vec[i] > 0:
+            r, c = i // board_size, i % board_size
+            move_probs.append(((r, c), float(policy_vec[i])))
+    pass_prob = float(policy_vec[-1])
+    if pass_prob > 0:
+        move_probs.append((None, pass_prob))
+
+    return move_probs, policy_vec

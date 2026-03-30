@@ -12,15 +12,20 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 REQUIRED)
 
+# Threading support
+find_package(Threads REQUIRED)
+
 # Build the Python module
 pybind11_add_module(alphago_core
     src/board.cpp
     src/mcts.cpp
+    src/parallel_mcts.cpp
     src/features.cpp
     src/bindings.cpp
 )
 
 target_include_directories(alphago_core PRIVATE src)
+target_link_libraries(alphago_core PRIVATE Threads::Threads)
 
 # Install to project root so Python can import it
 install(TARGETS alphago_core DESTINATION ${CMAKE_SOURCE_DIR})
