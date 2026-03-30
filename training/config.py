@@ -59,6 +59,10 @@ class TrainingConfig:
     eval_simulations: int = 400      # MCTS sims per move during eval (more than training)
     eval_every_n_iterations: int = 10
 
+    # ── Parallel self-play ─────────────────────────────────────────
+    use_parallel_self_play: bool = True   # use batched inference
+    num_parallel_games: int = 16          # simultaneous games (tune for GPU memory)
+
     # ── C++ acceleration ──────────────────────────────────────────
     use_cpp: bool = True  # use C++ board engine if available
 
