@@ -5,6 +5,17 @@ Game manager — wraps Board with turn tracking, game-end detection, and resign.
 from go_engine.board import Board, BLACK, WHITE, OPPONENT
 
 
+def _create_board(size: int, use_cpp: bool = False):
+    """Create a board using C++ backend if requested and available."""
+    if use_cpp:
+        try:
+            from go_engine.cpp_board import CppBoard
+            return CppBoard(size=size)
+        except (ImportError, RuntimeError):
+            pass
+    return Board(size=size)
+
+
 class Game:
     """
     Manages a full game of Go.
@@ -21,8 +32,8 @@ class Game:
         result = game.result()     # scoring
     """
 
-    def __init__(self, size: int = 13, komi: float = 6.5):
-        self.board = Board(size=size)
+    def __init__(self, size: int = 13, komi: float = 6.5, use_cpp: bool = False):
+        self.board = _create_board(size, use_cpp=use_cpp)
         self.board.komi = komi
         self.current_player = BLACK
         self.is_over = False

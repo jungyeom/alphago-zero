@@ -14,6 +14,13 @@ from model.features import board_to_features
 from mcts.search import get_move_probabilities_with_net
 from training.config import TrainingConfig
 
+# Try to import C++ MCTS
+try:
+    from mcts.cpp_search import get_move_probabilities_cpp
+    _HAS_CPP_MCTS = True
+except (ImportError, RuntimeError):
+    _HAS_CPP_MCTS = False
+
 
 def play_self_play_game(
     net: torch.nn.Module,
@@ -35,7 +42,8 @@ def play_self_play_game(
           - result: +1 if black won, -1 if white won
           - num_moves: total moves in the game
     """
-    game = Game(size=config.board_size, komi=6.5)
+    use_cpp = getattr(config, 'use_cpp', False)
+    game = Game(size=config.board_size, komi=6.5, use_cpp=use_cpp)
 
     features_list = []
     policies_list = []
@@ -56,14 +64,24 @@ def play_self_play_game(
         features = board_to_features(game.board, color)
 
         # Run MCTS to get improved policy
-        move_probs, policy_vec = get_move_probabilities_with_net(
-            game.board,
-            color,
-            net,
-            num_simulations=config.num_simulations,
-            temperature=temperature,
-            device=device,
-        )
+        if use_cpp and _HAS_CPP_MCTS:
+            move_probs, policy_vec = get_move_probabilities_cpp(
+                game.board,
+                color,
+                net,
+                num_simulations=config.num_simulations,
+                temperature=temperature,
+                device=device,
+            )
+        else:
+            move_probs, policy_vec = get_move_probabilities_with_net(
+                game.board,
+                color,
+                net,
+                num_simulations=config.num_simulations,
+                temperature=temperature,
+                device=device,
+            )
 
         # Store training data
         features_list.append(features)

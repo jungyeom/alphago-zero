@@ -22,6 +22,15 @@ import torch
 
 from go_engine.board import Board, BLACK, WHITE, EMPTY, OPPONENT
 
+# Try to import C++ feature extraction
+try:
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import alphago_core as _ac
+    _HAS_CPP_FEATURES = True
+except ImportError:
+    _HAS_CPP_FEATURES = False
+
 
 NUM_FEATURES = 8
 
@@ -82,15 +91,45 @@ def board_to_features(board: Board, color_to_play: int) -> np.ndarray:
     return features
 
 
-def board_to_tensor(board: Board, color_to_play: int) -> torch.Tensor:
+def board_to_features_cpp(board, color_to_play: int) -> np.ndarray:
+    """
+    C++ accelerated feature extraction.
+    Works with both CppBoard (has ._board) and CBoard directly.
+    """
+    # Get the underlying C++ board
+    cboard = getattr(board, '_board', None)
+    if cboard is None and hasattr(board, 'at'):
+        # It's already a CBoard
+        cboard = board
+
+    if cboard is None:
+        # Fall back to Python
+        return board_to_features(board, color_to_play)
+
+    # Get last move for plane 3
+    last_r, last_c = -1, -1
+    if hasattr(board, 'move_history') and board.move_history:
+        _, last_move = board.move_history[-1]
+        if last_move is not None:
+            last_r, last_c = last_move
+
+    return _ac.board_to_features_cpp(cboard, color_to_play, last_r, last_c)
+
+
+def board_to_tensor(board, color_to_play: int) -> torch.Tensor:
     """
     Convert board state to a PyTorch tensor ready for the network.
+
+    Uses C++ feature extraction when available for ~10x speedup.
 
     Returns:
         Tensor of shape (1, NUM_FEATURES, board_size, board_size)
         (batch dimension included)
     """
-    features = board_to_features(board, color_to_play)
+    if _HAS_CPP_FEATURES and hasattr(board, '_board'):
+        features = board_to_features_cpp(board, color_to_play)
+    else:
+        features = board_to_features(board, color_to_play)
     return torch.from_numpy(features).unsqueeze(0)
 
 

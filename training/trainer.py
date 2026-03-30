@@ -308,6 +308,8 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--use-cpp", action="store_true", default=False,
+                        help="Use C++ board engine (run ./build_cpp.sh first)")
     args = parser.parse_args()
 
     config = TrainingConfig(
@@ -318,6 +320,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         learning_rate=args.lr,
         device=args.device,
+        use_cpp=args.use_cpp,
     )
 
     train(config, resume_from=args.resume)

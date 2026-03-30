@@ -59,5 +59,8 @@ class TrainingConfig:
     eval_simulations: int = 400      # MCTS sims per move during eval (more than training)
     eval_every_n_iterations: int = 10
 
+    # ── C++ acceleration ──────────────────────────────────────────
+    use_cpp: bool = True  # use C++ board engine if available
+
     # ── Device ──────────────────────────────────────────────────────
     device: str = "auto"  # "auto", "cpu", "cuda", "mps"
