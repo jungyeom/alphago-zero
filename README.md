@@ -92,86 +92,157 @@ cd web && npm run dev
 
 Open `http://localhost:5173`, select the board size that matches your trained model, and play. The server auto-detects the latest checkpoint in `checkpoints/`.
 
-## Training on a GPU
+## Training on a GPU (end-to-end guide)
 
-The local test uses a 5x5 board on CPU. For real 13x13 training, you need a GPU.
+The local test uses a 5x5 board on CPU. For real 13x13 training, you need a GPU instance.
 
-### Recommended setup
+### Step 1: Create a GPU instance on RunPod
 
-| Provider | GPU | Cost | Notes |
-|----------|-----|------|-------|
-| RunPod | A10G (24GB) | ~$0.50/hr | Good balance of price and speed |
-| Lambda | A10G | ~$0.75/hr | Simple setup |
-| RunPod | L4 (24GB) | ~$0.40/hr | Slightly slower, cheaper |
+1. Create an account at [runpod.io](https://www.runpod.io) and add credit ($10-25 to start)
+2. Click **Pods** in the left sidebar, then **+ Deploy**
+3. Select **RTX 4090** (24GB) — best speed/cost for our model size
+4. Choose the **RunPod PyTorch 2.x** template
+5. Set **Container Disk** to 20GB, **Volume Disk** to 5GB
+6. Click **Deploy On-Demand** (or **Spot** for ~$0.20/hr with possible interruption)
 
-### Setup on a GPU instance
+| GPU | VRAM | On-demand | Spot | Best for |
+|-----|------|-----------|------|----------|
+| **RTX 4090** | 24GB | $0.34/hr | $0.20/hr | Best speed-per-dollar |
+| RTX 4070 Ti | 12GB | $0.19/hr | $0.10/hr | Budget option |
+| RTX 3090 | 24GB | $0.22/hr | $0.11/hr | Cheaper, slightly slower |
+
+### Step 2: Connect and set up
+
+Once the pod is running, click **Connect** and open **Web Terminal** (or SSH).
 
 ```bash
-# Clone and install
+# Clone the repo (use mcts-optimizer branch for C++ acceleration)
 git clone https://github.com/jungyeom/alphago-zero.git
 cd alphago-zero
-pip install uv    # if uv not available
+git checkout mcts-optimizer
+
+# Install dependencies
+pip install uv
 uv sync
 
+# Build C++ acceleration (15x faster board operations)
+./build_cpp.sh
+
 # Verify GPU is available
-uv run python -c "import torch; print(torch.cuda.is_available())"
+uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name())"
 ```
 
-### Run training
+### Step 3: Start training
+
+Run training inside `tmux` or `screen` so it survives SSH disconnection:
 
 ```bash
-# Full 13x13 training (default config)
-uv run python -m training.trainer \
-  --board-size 13 \
-  --num-iterations 200 \
-  --games-per-iter 100 \
-  --simulations 200 \
-  --device cuda
+tmux new -s train
 
-# Budget-conscious: fewer iterations, smaller simulations
+# Recommended 13x13 config for ~$5-10 budget
 uv run python -m training.trainer \
   --board-size 13 \
   --num-iterations 100 \
   --games-per-iter 50 \
-  --simulations 100 \
-  --device cuda
-
-# Start with 9x9 (faster, cheaper, still interesting)
-uv run python -m training.trainer \
-  --board-size 9 \
-  --num-iterations 150 \
-  --games-per-iter 80 \
   --simulations 150 \
-  --device cuda
+  --use-cpp \
+  --device cuda 2>&1 | tee training.log
+
+# Detach tmux: Ctrl+B then D
+# Reattach later: tmux attach -t train
 ```
 
-### Resume from checkpoint
-
-If your instance gets interrupted or you want to continue training:
+Other training configs:
 
 ```bash
+# Budget-conscious (~$3-5)
+uv run python -m training.trainer \
+  --board-size 13 --num-iterations 50 --games-per-iter 30 \
+  --simulations 100 --use-cpp --device cuda
+
+# Stronger model (~$10-17)
+uv run python -m training.trainer \
+  --board-size 13 --num-iterations 200 --games-per-iter 100 \
+  --simulations 200 --use-cpp --device cuda
+
+# 9x9 (faster, good for experimentation)
+uv run python -m training.trainer \
+  --board-size 9 --num-iterations 150 --games-per-iter 80 \
+  --simulations 150 --use-cpp --device cuda
+```
+
+### Step 4: Monitor training
+
+In a second terminal (or another tmux pane):
+
+```bash
+# Watch live loss values
+tail -f training.log | grep "Epoch\|Self-play\|Iteration"
+
+# Or launch TensorBoard dashboard
+uv run tensorboard --logdir runs/ --bind_all
+```
+
+If using TensorBoard, forward port 6006 from your laptop:
+```bash
+# From your laptop
+ssh -L 6006:localhost:6006 root@<pod-ip> -p <port>
+```
+Then open `http://localhost:6006` to see live loss curves.
+
+What healthy training looks like:
+- **Policy loss**: decreasing from ~3.2 to ~1.5 over 100 iterations
+- **Value loss**: decreasing from ~1.0 to ~0.3, then stabilizing
+- **Game length**: increasing from ~60 to ~200 as the model learns
+
+See [docs/monitoring_training.md](docs/monitoring_training.md) for detailed troubleshooting.
+
+### Step 5: Resume if interrupted
+
+If the instance stops (spot reclaimed, SSH drops, etc.), your checkpoints are saved:
+
+```bash
+# Resume from the latest checkpoint
 uv run python -m training.trainer \
   --resume checkpoints/model_iter_0050.pt \
-  --device cuda
+  --use-cpp --device cuda
 ```
+
+Checkpoints are saved every 5 iterations (~5MB each). At most you lose the current in-progress iteration.
+
+### Step 6: Download your model
+
+When training finishes, copy the checkpoint to your laptop:
+
+```bash
+# From your laptop (RunPod shows SSH details in the Connect tab)
+scp -P <port> root@<pod-ip>:~/alphago-zero/checkpoints/model_final.pt ./checkpoints/
+```
+
+**Stop the pod** to stop billing.
+
+### Step 7: Play against it locally
+
+Back on your laptop, no GPU needed:
+
+```bash
+# Terminal 1: start the backend (auto-loads checkpoints/model_final.pt)
+uv run python -m evaluation.server
+
+# Terminal 2: start the frontend
+cd web && npm run dev
+```
+
+Open `http://localhost:5173`, select 13x13, and play. CPU inference takes 1-5 seconds per AI move.
 
 ### Compute budget estimates
 
-| Board | Iterations | Games/iter | Sims | Est. time | Est. cost (~$1/hr) |
-|-------|-----------|------------|------|-----------|-------------------|
-| 5x5 | 30 | 10 | 50 | ~15 min | free (CPU) |
-| 9x9 | 150 | 80 | 150 | ~15-25 hrs | $15-25 |
-| 13x13 | 200 | 100 | 200 | ~30-60 hrs | $30-60 |
-
-### Download your model
-
-After training, copy the checkpoint back to your laptop:
-
-```bash
-scp gpu-instance:~/alphago-zero/checkpoints/model_final.pt ./checkpoints/
-```
-
-Then run the web UI locally to play against it.
+| Board | Config | Est. time (RTX 4090) | Est. cost (spot) |
+|-------|--------|---------------------|-----------------|
+| 5x5 | 30 iters, 10 games, 50 sims | ~15 min | free (CPU) |
+| 9x9 | 150 iters, 80 games, 150 sims | ~8-15 hrs | $2-3 |
+| 13x13 | 100 iters, 50 games, 150 sims | ~15-25 hrs | $3-5 |
+| 13x13 | 200 iters, 100 games, 200 sims | ~30-50 hrs | $6-10 |
 
 ## Comparing models
 
@@ -218,6 +289,7 @@ The `docs/` folder contains plain-English explanations of every component:
 - [MCTS explained](docs/mcts_explained.md) — search algorithm, UCB1/PUCT, rollouts vs neural net
 - [Neural net explained](docs/neural_net_explained.md) — ResNet architecture, features, training
 - [Training explained](docs/training_explained.md) — self-play loop, replay buffer, temperature
+- [Monitoring training](docs/monitoring_training.md) — TensorBoard dashboard, what to watch, troubleshooting
 - [Evaluation explained](docs/evaluation_explained.md) — model comparison arena
 - [Web UI explained](docs/web_ui_explained.md) — frontend/backend architecture, API reference
 
