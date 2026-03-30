@@ -20,3 +20,5 @@ checkpoints/
 
 # OS
 .DS_Store
+build/
+*.so
