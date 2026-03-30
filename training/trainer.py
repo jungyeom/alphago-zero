@@ -228,6 +228,13 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
     # Replay buffer
     buffer = ReplayBuffer(max_size=config.replay_buffer_size)
 
+    # Logger (TensorBoard + CSV)
+    from training.logger import TrainingLogger
+    log_dir = os.path.join("runs", f"b{config.board_size}_n{config.num_blocks}_f{config.num_filters}")
+    logger = TrainingLogger(log_dir=log_dir)
+    print(f"Logging to: {log_dir}/")
+    print(f"  View dashboard: tensorboard --logdir runs/")
+
     # Training loop
     for iteration in range(start_iteration, config.num_iterations + 1):
         iter_start = time.time()
@@ -263,9 +270,17 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
             )
             positions_added += n
 
+        # Self-play stats
+        avg_moves = sum(g["num_moves"] for g in games) / len(games)
+        black_wins = sum(1 for g in games if g["result"] > 0)
+        black_win_rate = black_wins / len(games)
+
         print(f"  Added {positions_added} positions "
               f"(buffer: {len(buffer)}/{config.replay_buffer_size})")
         print(f"  Self-play time: {sp_time:.1f}s")
+
+        logger.log_self_play(iteration, len(games), avg_moves, black_win_rate, sp_time)
+        logger.log_buffer(iteration, len(buffer), positions_added)
 
         # 3. Train the network
         if len(buffer) >= config.min_buffer_size:
@@ -284,7 +299,11 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
 
             train_time = time.time() - train_start
             print(f"  Training time: {train_time:.1f}s")
+
+            lr = optimizer.param_groups[0]["lr"]
+            logger.log_training(iteration, losses["policy_loss"], losses["value_loss"], losses["total_loss"], lr)
         else:
+            train_time = 0.0
             print(f"\n  Skipping training (buffer {len(buffer)} < {config.min_buffer_size})")
 
         # 4. Step the learning rate scheduler
@@ -297,11 +316,14 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
 
         iter_time = time.time() - iter_start
         print(f"\n  Iteration time: {iter_time:.1f}s")
+        logger.log_iteration_time(iteration, iter_time, sp_time, train_time)
 
     # Save final model
     final_path = save_checkpoint(net, optimizer, config.num_iterations, config,
                                   path=os.path.join(config.checkpoint_dir, "model_final.pt"))
+    logger.close()
     print(f"\nTraining complete. Final model: {final_path}")
+    print(f"View training dashboard: tensorboard --logdir runs/")
 
 
 if __name__ == "__main__":
