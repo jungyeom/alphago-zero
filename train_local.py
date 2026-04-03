@@ -42,9 +42,11 @@ config = TrainingConfig(
     temp_threshold=8,  # fewer opening moves on 5x5
     temp_final=0.1,
 
-    # CPU
+    # CPU + C++ multi-threaded MCTS
     device="cpu",
     use_mixed_precision=False,
+    use_cpp=True,
+    num_search_threads=4,
 
     # Eval
     eval_every_n_iterations=10,

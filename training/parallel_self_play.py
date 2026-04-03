@@ -10,6 +10,10 @@ we run N games in lockstep:
 
 This keeps the GPU busy with large batch sizes instead of idle between
 individual forward passes.
+
+When the C++ multi-threaded MCTS is available (--use-cpp --search-threads N),
+each game uses N C++ worker threads with virtual loss + GPU batch queue,
+replacing the Python MCTS entirely.
 """
 
 import time
@@ -21,6 +25,13 @@ from go_engine.game import Game
 from model.features import board_to_features
 from mcts.batch_search import ParallelMCTS
 from training.config import TrainingConfig
+
+# Try to import C++ multi-threaded MCTS
+try:
+    from mcts.cpp_search import search_parallel_cpp
+    _HAS_CPP_PARALLEL = True
+except (ImportError, RuntimeError):
+    _HAS_CPP_PARALLEL = False
 
 
 def generate_parallel_self_play(
@@ -55,23 +66,28 @@ def generate_parallel_self_play(
     net.eval()
 
     # State for each parallel slot
-    games: list[Game] = [Game(size=config.board_size) for _ in range(num_parallel)]
+    use_cpp = getattr(config, 'use_cpp', False)
+    games: list[Game] = [Game(size=config.board_size, komi=6.5, use_cpp=use_cpp) for _ in range(num_parallel)]
     move_counts: list[int] = [0] * num_parallel
     game_data: list[dict] = [
         {"features": [], "policies": [], "colors": []} for _ in range(num_parallel)
     ]
 
-    mcts = ParallelMCTS(
-        net=net,
-        num_games=num_parallel,
-        board_size=config.board_size,
-        num_simulations=config.num_simulations,
-        c_puct=config.c_puct,
-        dirichlet_alpha=config.dirichlet_alpha,
-        dirichlet_weight=config.dirichlet_weight,
-        device=device,
-    )
-    mcts.games = games
+    num_threads = getattr(config, 'num_search_threads', 1)
+    use_cpp_parallel = use_cpp and _HAS_CPP_PARALLEL and num_threads > 1
+
+    if not use_cpp_parallel:
+        mcts = ParallelMCTS(
+            net=net,
+            num_games=num_parallel,
+            board_size=config.board_size,
+            num_simulations=config.num_simulations,
+            c_puct=config.c_puct,
+            dirichlet_alpha=config.dirichlet_alpha,
+            dirichlet_weight=config.dirichlet_weight,
+            device=device,
+        )
+        mcts.games = games
 
     completed_games: list[dict] = []
     start_time = time.time()
@@ -101,18 +117,39 @@ def generate_parallel_self_play(
             game_data[i]["features"].append(features)
             game_data[i]["colors"].append(color)
 
-        # Batch MCTS search across all active games
-        # Use the most common temperature (they're usually the same)
-        # For simplicity, process each temperature group separately
-        temp_groups: dict[float, list[int]] = {}
-        for idx, temp in zip(active_indices, temperatures):
-            temp_groups.setdefault(temp, []).append(idx)
-
+        # MCTS search for all active games
         move_results: dict[int, tuple] = {}
-        for temp, indices in temp_groups.items():
-            results = mcts.search_batch(indices, temperature=temp)
-            for idx, result in zip(indices, results):
-                move_results[idx] = result
+
+        if use_cpp_parallel:
+            # C++ multi-threaded MCTS: each game runs with N worker threads
+            min_bs = getattr(config, 'min_batch_size', 4)
+            max_bs = getattr(config, 'max_batch_size', 16)
+            for idx, temp in zip(active_indices, temperatures):
+                move, policy_vec = search_parallel_cpp(
+                    games[idx].board,
+                    games[idx].current_player,
+                    net,
+                    num_simulations=config.num_simulations,
+                    num_threads=num_threads,
+                    min_batch_size=min_bs,
+                    max_batch_size=max_bs,
+                    c_puct=config.c_puct,
+                    dirichlet_alpha=config.dirichlet_alpha,
+                    dirichlet_weight=config.dirichlet_weight,
+                    temperature=temp,
+                    device=device,
+                )
+                move_results[idx] = (move, policy_vec)
+        else:
+            # Python batched MCTS: batch leaf evals across all games
+            temp_groups: dict[float, list[int]] = {}
+            for idx, temp in zip(active_indices, temperatures):
+                temp_groups.setdefault(temp, []).append(idx)
+
+            for temp, indices in temp_groups.items():
+                results = mcts.search_batch(indices, temperature=temp)
+                for idx, result in zip(indices, results):
+                    move_results[idx] = result
 
         # Play moves and check for game end
         for i in active_indices:
@@ -153,8 +190,9 @@ def generate_parallel_self_play(
 
                 # Reset slot for a new game (if we need more games)
                 if len(completed_games) < num_games:
-                    games[i] = Game(size=config.board_size)
-                    mcts.games[i] = games[i]
+                    games[i] = Game(size=config.board_size, komi=6.5, use_cpp=use_cpp)
+                    if not use_cpp_parallel:
+                        mcts.games[i] = games[i]
                     move_counts[i] = 0
                     game_data[i] = {"features": [], "policies": [], "colors": []}
                 else:

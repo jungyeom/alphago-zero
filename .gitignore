@@ -22,3 +22,7 @@ checkpoints/
 .DS_Store
 build/
 *.so
+
+# Training runs / logs
+runs/
+training.log

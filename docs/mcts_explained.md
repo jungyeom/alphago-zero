@@ -1,6 +1,11 @@
 # How Monte Carlo Tree Search Works
 
-MCTS is the search algorithm at the heart of AlphaGo and AlphaZero. It's how the AI "thinks ahead" — exploring possible futures to decide what move to play. This document explains the version we've built so far, which uses **random rollouts** (no neural network yet).
+MCTS is the search algorithm at the heart of AlphaGo and AlphaZero. It's how the AI "thinks ahead" — exploring possible futures to decide what move to play.
+
+Our implementation has three layers:
+1. **Python MCTS** — readable reference implementation with random rollouts and neural net evaluation
+2. **C++ single-threaded MCTS** — same algorithm, ~15x faster board operations via pybind11
+3. **C++ multi-threaded MCTS** — N worker threads with virtual loss + GPU batch queue for ~2-4x additional speedup
 
 ---
 
@@ -20,191 +25,221 @@ Each MCTS "simulation" (iteration) follows four steps:
 
 Start at the root (current position) and walk down the tree, picking the "best" child at each level, until you reach a **leaf node** — a position that hasn't been explored yet.
 
-"Best" is defined by the **UCB1 formula**:
+"Best" is defined by the **PUCT formula** (what AlphaZero uses):
 
 ```
-score = Q + c * sqrt(ln(N_parent) / N_child)
+score = Q + c * P * sqrt(N_parent) / (1 + N_child)
 ```
 
 - **Q** = average win rate through this node (exploitation — pick what's worked before)
-- **c * sqrt(...)** = exploration bonus (exploration — try things we haven't tried much)
-- **c** = constant that balances the two (we use 1.4)
+- **P** = prior probability from the neural network (focus on moves the net thinks are good)
+- **c** = exploration constant (we use 1.5)
+- The exploration bonus decreases as a child is visited more
 
-Unvisited nodes get a score of infinity, so they're always tried at least once. After that, the formula naturally balances:
-- Nodes with high win rates get visited more (exploitation)
-- Nodes with few visits get a bonus (exploration)
+We also support the classic **UCB1 formula** (`Q + c * sqrt(ln(N_parent) / N_child)`) for comparison, but PUCT is what's used in practice.
 
 ### EXPAND
 
-When we reach a leaf node, we create child nodes for all legal moves from that position. Each child represents "what if we played this move?"
+When we reach a leaf node, create child nodes for all legal moves. Each child gets a prior probability from the neural network's policy head.
 
-### EVALUATE (Rollout)
+### EVALUATE
 
-From the leaf position, play **completely random moves** for both sides until the game ends. Score the result: +1 if black wins, -1 if white wins.
-
-This is the "Monte Carlo" part — we're using random sampling to estimate the value of a position. One random game is noisy and unreliable, but the average over many random games gives a surprisingly useful signal.
-
-> **Important**: In Step 5, we'll replace this random rollout with a neural network evaluation. The network will look at the position and directly output a value estimate, which is much faster and more accurate than playing random moves to the end.
+The neural network looks at the leaf position and outputs a value estimate in [-1, +1] — how much it thinks black is winning. This replaces random rollouts, which are much slower and noisier.
 
 ### BACKUP
 
-Take the result from the rollout and propagate it back up the path we walked during SELECT. At each node, increment the visit count and add the result to the total value.
-
-The values are stored from each player's perspective — a black win is +1 at black's nodes and -1 at white's nodes. This way, each node's Q value (average value) represents "how good is this move for the player who made it."
+Propagate the value back up the path from the leaf to the root. At each node, increment the visit count and add the value (flipped for the opponent's perspective).
 
 ---
 
-## 3. The Tree Node (`node.py`)
+## 3. Implementation Layers
 
-Each node in the search tree stores:
+### Python MCTS (`mcts/node.py`, `mcts/search.py`)
 
-| Field | What it is | Why it matters |
-|-------|-----------|----------------|
-| `move` | The move that led to this node | So we know what move to play |
-| `parent` | Link to parent node | For backup (propagating values up) |
-| `children` | List of child nodes | The moves we can explore from here |
-| `color` | Who played the move | To flip value perspective during backup |
-| `visit_count` (N) | How many times this node was visited | Used in UCB1 formula and for final move selection |
-| `total_value` (W) | Sum of all backed-up values | Divided by N to get Q (average value) |
-| `prior` (P) | Prior probability | Unused now, will come from neural net in Step 5 |
+The readable reference implementation. Every node, selection, expansion, and backup step is in Python. This is where to look to understand the algorithm.
 
-### Two selection formulas
+Key files:
+- `mcts/node.py` — tree node with UCB1 and PUCT scoring
+- `mcts/search.py` — single-threaded search with rollouts and neural net evaluation
+- `mcts/batch_search.py` — batched search across N games (batches GPU evaluations for better throughput)
 
-The node supports two formulas:
+### C++ Single-Threaded MCTS (`src/mcts.cpp`)
 
-1. **UCB1** (what we use now): `Q + c * sqrt(ln(N_parent) / N_child)` — the classic MCTS formula. The exploration bonus depends only on visit counts.
+Same algorithm as the Python version, but the board engine, tree traversal, and node operations run in C++. Only neural net evaluation crosses back to Python.
 
-2. **PUCT** (what AlphaZero uses): `Q + c * P * sqrt(N_parent) / (1 + N_child)` — uses the neural network's prior probability P to guide exploration. Moves the network thinks are promising get explored more. We'll switch to this in Step 5.
+This gives ~15x speedup over pure Python for board operations (legal move generation, capture detection, scoring).
+
+Key files:
+- `src/board.h/cpp` — Go board with Zobrist hashing, superko detection
+- `src/mcts.h/cpp` — MCTS search loop, PUCT selection, backup
+- `src/mcts_node.h` — tree node with PUCT scoring
+- `src/features.h/cpp` — board-to-tensor feature extraction
+- `src/bindings.cpp` — pybind11 Python bindings
+- `mcts/cpp_search.py` — Python wrappers (`search_cpp()`, `search_parallel_cpp()`)
+
+### C++ Multi-Threaded MCTS (`src/parallel_mcts.cpp`)
+
+The key optimization. Multiple C++ threads explore the same MCTS tree simultaneously:
+
+```
+Worker Thread 1: select -> reconstruct -> [wait for GPU] -> expand -> backup
+Worker Thread 2: select -> reconstruct -> [wait for GPU] -> expand -> backup
+Worker Thread 3: select -> reconstruct -> [wait for GPU] -> expand -> backup
+Worker Thread 4: select -> reconstruct -> [wait for GPU] -> expand -> backup
+                                |
+                                v
+Evaluator Thread: collect batch -> GPU forward pass -> dispatch results
+```
+
+This overlaps CPU tree work with GPU inference, keeping both busy.
 
 ---
 
-## 4. The Search Process (`search.py`)
+## 4. Multi-Threaded MCTS Deep Dive
 
-### How a search runs
+### The Problem with Single-Threaded MCTS
+
+In single-threaded MCTS, the GPU sits idle while the CPU does tree traversal, and the CPU sits idle during the GPU forward pass. With 200 simulations per move, most of the time is wasted waiting.
+
+### Virtual Loss
+
+When multiple threads select paths through the tree, they'd all follow the same "best" path and redundantly explore it. **Virtual loss** solves this:
+
+1. When a thread selects a node, it adds a temporary penalty (virtual loss) to that node
+2. This makes the node look worse to other threads
+3. Other threads explore different branches instead
+4. When the thread finishes (backup), it removes the virtual loss
+
+The formula with virtual loss:
 
 ```
-1. Create root node
-2. Expand root (create children for all legal moves)
-3. For each simulation:
-   a. SELECT: walk down tree using UCB1 to find a leaf
-   b. Reconstruct the board state at the leaf (replay moves from root)
-   c. EXPAND: create children of the leaf
-   d. EVALUATE: random rollout from the leaf position
-   e. BACKUP: propagate the value up to the root
-4. Return the root (with all accumulated statistics)
+Q_vl = (total_value - virtual_loss_count * vloss_value) / (visit_count + virtual_loss_count)
 ```
 
-### Reconstructing board state
+This naturally causes threads to diversify across the tree — each thread explores a different promising branch.
 
-The tree only stores moves, not full board states (that would use too much memory). To know the actual board position at a leaf node, we:
+### GPU Batch Queue
 
-1. Walk from the leaf back up to the root, collecting the moves along the way
-2. Starting from the root's board position, replay those moves one by one
+Worker threads don't call the neural network directly. Instead:
 
-This is a tradeoff: it costs some computation per simulation, but saves a lot of memory.
+1. Worker reaches a leaf and submits its board position to a **batch queue**
+2. Worker blocks (waits for result via a promise/future)
+3. The **evaluator thread** collects multiple positions from the queue
+4. Evaluator runs one batched GPU forward pass for all collected positions
+5. Evaluator dispatches results back to the waiting workers
 
-### Choosing the final move
+This batches GPU calls automatically. With 4 worker threads, the evaluator typically processes 2-4 positions per batch. On GPU, this is much more efficient than 4 separate forward passes.
 
-After all simulations are done, we pick the move with the **most visits**, not the highest win rate. Why?
+Key files:
+- `src/batch_queue.h` — promise/future based queue connecting workers to evaluator
+- `src/parallel_mcts.cpp` — worker thread loop and evaluator thread loop
 
-- Visit count is more stable (less affected by noise)
-- UCB1 naturally directs more visits to better moves
-- The most-visited child is the one the search is most "confident" about
+### GIL Management
 
-### Move probabilities and temperature
+Python's Global Interpreter Lock (GIL) prevents true parallelism in Python threads. Our design avoids this bottleneck:
 
-For training the neural network later, we don't just want the best move — we want a **probability distribution** over all moves. This comes from the visit counts:
+- The pybind11 binding **releases the GIL** before entering C++ (`py::gil_scoped_release`)
+- Worker threads run entirely in C++ — no GIL needed
+- Only the **evaluator thread** acquires the GIL, and only for the duration of the neural net forward pass
+- The GIL is released immediately after the forward pass completes
+
+This means N worker threads run at full speed in C++ while the evaluator handles all Python/GPU interaction.
+
+### Thread Safety
+
+All tree modifications are protected by a global mutex:
+- `select_with_virtual_loss()` — reads tree + adds virtual loss (under lock)
+- `expand_node_threadsafe()` — creates children (under lock, checks if already expanded)
+- `backup_with_virtual_loss()` — updates values + removes virtual loss (under lock)
+
+Board reconstruction and batch queue operations are thread-safe without the tree mutex (each worker has its own board copy; the queue has its own internal mutex).
+
+The global tree mutex is simple and correct. For 4-8 threads it performs well. Scaling to 16+ threads would benefit from per-node atomic operations (future optimization).
+
+---
+
+## 5. Performance
+
+### Measured Speedup (9x9 board, 200 simulations, CPU)
+
+| Configuration | Time per search | Speedup |
+|---------------|----------------|---------|
+| Python MCTS | ~0.5s | baseline |
+| C++ single-threaded | ~0.06s | ~8x |
+| C++ 2 threads | ~0.05s | ~10x |
+| C++ 4 threads | ~0.026s | ~19x |
+
+On GPU, the speedup is even larger because the batch queue keeps the GPU fed with larger batches.
+
+### ParallelStats
+
+The C++ multi-threaded MCTS tracks statistics to verify threads are doing real work:
+
+```python
+result = mcts.search_parallel(board, color, batch_eval_fn, temperature)
+stats = result.parallel_stats
+
+stats.sims_per_thread  # e.g. [50, 50, 50, 50] for 4 threads, 200 sims
+stats.num_batches      # how many GPU batches the evaluator processed
+stats.total_batch_items  # total positions evaluated (should equal num_simulations)
+```
+
+---
+
+## 6. Choosing the Final Move
+
+After all simulations are done, we pick the move based on visit counts:
 
 ```
 probability(move) = visits(move)^(1/temperature) / sum(all visits^(1/temperature))
 ```
 
 - **Temperature = 1.0**: proportional to visit counts (more exploratory)
-- **Temperature → 0**: all probability on the most-visited move (deterministic)
+- **Temperature -> 0**: all probability on the most-visited move (deterministic)
 
-During training, we'll use temperature=1.0 for the first ~15 moves (to generate diverse training data) and then switch to low temperature (to play stronger moves).
+During training, temperature=1.0 is used for the first ~15 moves (diverse training data) then drops to 0.1 (full strength).
 
----
+### Dirichlet Noise
 
-## 5. Why Random Rollouts Work (and Their Limitations)
-
-### Why they work at all
-
-Random play might seem useless, but averaging over hundreds of random games from a position gives a real signal. A position where black has surrounded a large territory will lead to more black wins even with random play. A position where a black group is about to be captured will lead to more black losses.
-
-### Their limitations
-
-1. **Noisy**: One random game tells you almost nothing. You need many simulations, which is slow.
-2. **Tactically blind**: Random play doesn't see captures, atari, or life/death. It might randomly save a dying group or randomly kill a living one.
-3. **Strategically oblivious**: Random play doesn't understand influence, thickness, or territory. It just plays legal moves at random.
-
-This is exactly why we'll add a neural network in Step 5. The network replaces the rollout with a direct position evaluation — it looks at the board and says "black is winning by about 0.3." This is faster (one forward pass vs playing 200 random moves) and far more accurate (it learns patterns from millions of positions).
-
----
-
-## 6. How MCTS Connects to AlphaZero
-
-Here's the full picture of how MCTS fits into the training loop (Steps 5-6):
+At the root node, we mix Dirichlet noise into the priors:
 
 ```
-Current MCTS (Step 3):          AlphaZero MCTS (Step 5):
-  SELECT  → UCB1                  SELECT  → PUCT (uses neural net prior P)
-  EXPAND  → uniform prior         EXPAND  → prior P from neural net
-  EVALUATE → random rollout       EVALUATE → neural net value V (no rollout!)
-  BACKUP  → same                  BACKUP  → same
+prior = (1 - weight) * network_prior + weight * dirichlet_noise
 ```
 
-The neural network gives MCTS two things:
-1. **Better priors** → the search focuses on promising moves instead of trying everything uniformly
-2. **Better evaluation** → direct value estimate instead of noisy random play
-
-MCTS then gives the neural network better training data:
-- The MCTS visit distribution is a **better policy** than the raw network output (because search found improvements)
-- This improved policy becomes the training target
-- The network learns to approximate it, and the cycle continues
+With alpha=0.1 and weight=0.25, this ensures the search explores some moves that the network wouldn't normally consider. This is essential for discovering new strategies during self-play.
 
 ---
 
-## 7. Key Numbers
+## 7. Key Parameters
 
-| Parameter | Current value | Why |
-|-----------|--------------|-----|
-| Simulations per move | 50-200 | Enough to beat random, but slow for 13x13 |
-| UCB1 exploration constant (c) | 1.4 | Standard value, balances exploration vs exploitation |
-| Max rollout length | 200 moves | Safety cap on random game length |
-| Board state reconstruction | Replay from root | Memory-efficient, costs O(depth) per simulation |
+| Parameter | Default | What it controls |
+|-----------|---------|------------------|
+| `num_simulations` | 200 | MCTS iterations per move |
+| `c_puct` | 1.5 | Exploration constant in PUCT formula |
+| `dirichlet_alpha` | 0.1 | Noise parameter (~10/board_size^2) |
+| `dirichlet_weight` | 0.25 | Mix ratio: 75% net prior + 25% noise |
+| `num_threads` | 4 | Worker threads for parallel search |
+| `min_batch_size` | 4 | Minimum positions per GPU batch |
+| `max_batch_size` | 16 | Maximum positions per GPU batch |
+| `virtual_loss_value` | 1.0 | Penalty per virtual loss unit |
 
-For reference, AlphaGo Zero used **1600 simulations per move**. We'll scale up during training.
+For reference, AlphaGo Zero used 1600 simulations per move with much larger networks.
 
 ---
 
-## 8. Benchmark Results: MCTS vs Random
+## 8. How MCTS Connects to Training
 
-We tested MCTS (random rollouts) against a purely random agent:
+MCTS both uses and improves the neural network:
 
-| Board | Sims | MCTS Win Rate | Notes |
-|-------|------|---------------|-------|
-| 5x5 | 50 | 60% | Barely better — 50 sims ≈ 2x the legal moves |
-| 5x5 | 200 | 70% | Clear improvement with more search |
-| 9x9 | 30 | 20% | Worse than random — 30 sims < 82 legal moves, no useful signal |
+```
+Network provides:
+  - Policy head -> prior probabilities P for PUCT selection
+  - Value head  -> leaf evaluation V (replaces random rollouts)
 
-### Key Takeaways
+MCTS produces:
+  - Visit distribution -> better policy (training target for policy head)
+  - Game outcomes     -> value labels (training target for value head)
+```
 
-1. **MCTS needs simulations > legal moves to work.** With fewer sims than legal moves, most children are visited at most once. UCB1 can't distinguish good from bad.
-
-2. **Random rollouts are a weak evaluator.** Even with sufficient simulations, the win rate tops out around 70% on 5x5. Random play is terrible at Go — it can't see captures, life/death, or territory. The signal is very noisy.
-
-3. **This is exactly why the neural net matters.** In Step 5, the network replaces rollouts with a direct value estimate. This gives:
-   - **Better evaluation**: trained on millions of positions, not random play
-   - **Better priors**: focuses search on promising moves via the policy head
-   - **Much faster**: one forward pass vs playing 100+ random moves
-
-4. **Performance optimization matters.** We had to optimize `is_legal()` (in-place simulation instead of board copy) and the rollout (sample random empty points instead of generating all legal moves) to make the benchmark tractable.
-
-### What "working" looks like at each stage
-
-| Stage | Expected strength |
-|-------|-------------------|
-| Random rollouts (now) | Slightly better than random on small boards |
-| Neural net + MCTS (Step 5) | Much stronger than random, should play recognizable Go |
-| Trained via self-play (Step 6) | Strong enough to beat beginners |
+The MCTS visit distribution is a better policy than the raw network output because search found improvements. The network learns to approximate it, and the cycle continues — each generation is stronger than the last.
