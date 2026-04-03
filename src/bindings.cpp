@@ -1,3 +1,10 @@
+// Standard headers BEFORE pybind11 to avoid cmath/random ambiguity on GCC 11
+#include <cmath>
+#include <cstring>
+#include <vector>
+#include <string>
+#include <random>
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>

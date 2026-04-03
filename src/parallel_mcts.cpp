@@ -9,6 +9,12 @@
  *                       call Python batch_eval_fn → release GIL → dispatch results.
  */
 
+// Standard headers BEFORE pybind11 to avoid cmath/random ambiguity on GCC 11
+#include <thread>
+#include <atomic>
+#include <random>
+#include <cstring>
+
 #include "parallel_mcts.h"
 #include "mcts.h"
 #include "mcts_node.h"
@@ -16,10 +22,6 @@
 
 #include <pybind11/pybind11.h>
 namespace py = pybind11;
-
-#include <thread>
-#include <atomic>
-#include <random>
 
 namespace alphago {
 
