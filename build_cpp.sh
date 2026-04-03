@@ -21,6 +21,14 @@ echo "pybind11: $PYBIND11_DIR"
 echo "Suffix:   $EXT_SUFFIX"
 echo ""
 
+# On Linux with GCC 11 + Python 3.13, auto-detect GCC 12+ to avoid __N macro clash
+if [ "$(uname)" = "Linux" ]; then
+    if [ -z "$CXX" ] && command -v g++-12 >/dev/null 2>&1; then
+        export CC=gcc-12 CXX=g++-12
+        echo "Auto-selected: $CXX (GCC 11 is incompatible with Python 3.13)"
+    fi
+fi
+
 # Configure
 mkdir -p build
 cd build
@@ -28,6 +36,8 @@ $CMAKE .. \
     -DCMAKE_BUILD_TYPE=Release \
     -Dpybind11_DIR="$PYBIND11_DIR" \
     -DPython_EXECUTABLE="$PYTHON_EXE" \
+    ${CXX:+-DCMAKE_CXX_COMPILER="$CXX"} \
+    ${CC:+-DCMAKE_C_COMPILER="$CC"} \
     -Wno-dev \
     2>&1 | grep -E "^(--|CMake|Configuring|Generating)" || true
 
