@@ -75,8 +75,19 @@ def play_self_play_game(
                 num_threads=num_threads,
                 temperature=temperature,
                 device=device,
+                min_batch_size=getattr(config, 'min_batch_size', 4),
+                max_batch_size=getattr(config, 'max_batch_size', 16),
             )
         elif use_cpp and _HAS_CPP_MCTS:
+            move_probs, policy_vec = get_move_probabilities_cpp(
+                game.board,
+                color,
+                net,
+                num_simulations=config.num_simulations,
+                temperature=temperature,
+                device=device,
+            )
+        else:
             move_probs, policy_vec = get_move_probabilities_with_net(
                 game.board,
                 color,

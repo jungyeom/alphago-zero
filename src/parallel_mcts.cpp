@@ -63,6 +63,12 @@ MCTSResult MCTSSearch::search_parallel(
     std::atomic<int> sims_remaining(config_.num_simulations);
     std::atomic<bool> workers_done(false);
 
+    // Stats tracking
+    std::vector<std::atomic<int>> thread_sim_counts(config_.num_threads);
+    for (auto& c : thread_sim_counts) c.store(0);
+    std::atomic<int> num_batches(0);
+    std::atomic<int> total_batch_items(0);
+
     // 4. Launch evaluator thread
     //    This is the ONLY thread that calls Python (acquires GIL).
     std::thread evaluator([&]() {
@@ -96,6 +102,10 @@ MCTSResult MCTSSearch::search_parallel(
                 py::gil_scoped_acquire acquire;
                 outputs = batch_eval_fn(boards, colors);
             }
+
+            // Track batch stats
+            num_batches.fetch_add(1, std::memory_order_relaxed);
+            total_batch_items.fetch_add(static_cast<int>(batch.size()), std::memory_order_relaxed);
 
             // Dispatch results to waiting worker threads
             for (size_t i = 0; i < batch.size(); i++) {
@@ -148,6 +158,7 @@ MCTSResult MCTSSearch::search_parallel(
 
                 // BACKUP with virtual loss removal
                 backup_with_virtual_loss(leaf, value);
+                thread_sim_counts[t].fetch_add(1, std::memory_order_relaxed);
             }
         });
     }
@@ -163,7 +174,16 @@ MCTSResult MCTSSearch::search_parallel(
     evaluator.join();
 
     // 8. Extract result
-    return extract_result(root.get(), board.size(), temperature);
+    auto result = extract_result(root.get(), board.size(), temperature);
+
+    // Populate parallel stats
+    result.parallel_stats.num_batches = num_batches.load();
+    result.parallel_stats.total_batch_items = total_batch_items.load();
+    for (int t = 0; t < config_.num_threads; t++) {
+        result.parallel_stats.sims_per_thread.push_back(thread_sim_counts[t].load());
+    }
+
+    return result;
 }
 
 } // namespace alphago

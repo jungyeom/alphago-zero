@@ -334,6 +334,7 @@ std::vector<MCTSResult> MCTSSearch::search_batch(
         }
 
         // Batch evaluate leaves that need it
+        std::vector<NetOutput> outputs;
         if (!needs_eval.empty()) {
             std::vector<const Board*> eval_boards;
             std::vector<uint8_t> eval_colors;
@@ -342,7 +343,7 @@ std::vector<MCTSResult> MCTSSearch::search_batch(
                 eval_colors.push_back(leaf_infos[idx].color);
             }
 
-            auto outputs = batch_eval_fn(eval_boards, eval_colors);
+            outputs = batch_eval_fn(eval_boards, eval_colors);
 
             for (int j = 0; j < static_cast<int>(needs_eval.size()); j++) {
                 int idx = needs_eval[j];
@@ -351,33 +352,26 @@ std::vector<MCTSResult> MCTSSearch::search_batch(
             }
         }
 
+        // Compute backup values
+        std::vector<double> leaf_values(K, 0.0);
+
+        for (int i = 0; i < K; i++) {
+            if (leaf_infos[i].game_over) {
+                auto s = leaf_infos[i].board.score();
+                leaf_values[i] = (s.winner == BLACK) ? 1.0 : -1.0;
+            }
+        }
+
+        for (int j = 0; j < static_cast<int>(needs_eval.size()); j++) {
+            int idx = needs_eval[j];
+            float v = outputs[j].value;
+            if (leaf_infos[idx].color == WHITE) v = -v;
+            leaf_values[idx] = v;
+        }
+
         // Backup all
         for (int i = 0; i < K; i++) {
-            auto& info = leaf_infos[i];
-            double value;
-            if (info.game_over) {
-                auto s = info.board.score();
-                value = (s.winner == BLACK) ? 1.0 : -1.0;
-            } else if (!needs_eval.empty()) {
-                // Find the net output for this leaf
-                bool found = false;
-                for (int j = 0; j < static_cast<int>(needs_eval.size()); j++) {
-                    if (needs_eval[j] == i) {
-                        float v = root_outputs[0].value; // placeholder
-                        // Actually get from the batch output
-                        auto& out = batch_eval_fn({&info.board}, {info.color})[0];
-                        v = out.value;
-                        if (info.color == WHITE) v = -v;
-                        value = v;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) value = 0.0;
-            } else {
-                value = 0.0;
-            }
-            backup(info.leaf, value);
+            backup(leaf_infos[i].leaf, leaf_values[i]);
         }
     }
 

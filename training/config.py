@@ -66,6 +66,8 @@ class TrainingConfig:
     # ── C++ acceleration ──────────────────────────────────────────
     use_cpp: bool = True  # use C++ board engine if available
     num_search_threads: int = 1  # MCTS threads per game (1=single-threaded, 4-8 on GPU)
+    min_batch_size: int = 4      # min positions to batch for GPU eval in parallel MCTS
+    max_batch_size: int = 16     # max positions per GPU batch in parallel MCTS
 
     # ── Device ──────────────────────────────────────────────────────
     device: str = "auto"  # "auto", "cpu", "cuda", "mps"

@@ -35,10 +35,17 @@ struct MCTSConfig {
     double virtual_loss_value = 1.0;
 };
 
+struct ParallelStats {
+    std::vector<int> sims_per_thread;  // simulations each worker completed
+    int num_batches = 0;               // total batches sent to evaluator
+    int total_batch_items = 0;         // total items evaluated across batches
+};
+
 struct MCTSResult {
     Move best_move;
     std::vector<float> policy_vec;
     int total_visits;
+    ParallelStats parallel_stats;      // populated only by search_parallel
 };
 
 class MCTSSearch {

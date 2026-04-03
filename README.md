@@ -1,52 +1,65 @@
 # AlphaZero Go
 
-An AlphaZero-style Go AI built from scratch in Python/PyTorch. Learns to play Go through pure self-play reinforcement learning — no human game data needed.
+An AlphaZero-style Go AI built from scratch in Python/PyTorch with C++ acceleration. Learns to play Go through pure self-play reinforcement learning — no human game data needed.
 
 The system combines a neural network with Monte Carlo Tree Search (MCTS). The network evaluates board positions and suggests moves; MCTS uses the network to search ahead and find stronger moves. The network then trains on the MCTS-improved policy, creating a virtuous cycle that progressively produces stronger play.
 
-## How it works
-
 ```
 Neural net predicts move probabilities + position value
-         ↓
+         |
 MCTS uses the net to search 200+ moves ahead
-         ↓
+         |
 Self-play games generate training data
-         ↓
+         |
 Network trains on MCTS-improved policy
-         ↓
-Repeat → stronger play each iteration
+         |
+Repeat -> stronger play each iteration
 ```
 
 ## Project structure
 
 ```
 alphago-zero/
-├── go_engine/          # Go rules: board state, captures, ko, scoring
-│   ├── board.py        # Core board with Zobrist hashing, Chinese scoring
-│   ├── game.py         # Game manager (turns, pass, resign)
-│   └── random_play.py  # Stress test (1,100 games, 0 errors)
-├── mcts/               # Monte Carlo Tree Search
-│   ├── node.py         # Tree node with UCB1 and PUCT scoring
-│   ├── search.py       # MCTS with random rollouts + neural net
-│   └── benchmark.py    # MCTS vs random agent arena
-├── model/              # Neural network
-│   ├── network.py      # ResNet with policy + value heads
-│   └── features.py     # Board → 8-channel tensor + symmetry augmentation
-├── training/           # Self-play training loop
-│   ├── config.py       # All hyperparameters
-│   ├── self_play.py    # Generate games via MCTS + net
-│   ├── trainer.py      # Training loop with checkpointing
-│   └── replay_buffer.py
-├── evaluation/         # Model comparison + play interface
-│   ├── arena.py        # Pit two models against each other
-│   └── server.py       # FastAPI backend for web UI
-├── web/                # React + TypeScript frontend
+├── go_engine/              # Go rules: board state, captures, ko, scoring
+│   ├── board.py            # Core board with Zobrist hashing, Chinese scoring
+│   ├── cpp_board.py        # Python wrapper around C++ board
+│   ├── game.py             # Game manager (turns, pass, resign)
+│   └── random_play.py      # Stress test (1,100 games, 0 errors)
+├── mcts/                   # Monte Carlo Tree Search
+│   ├── node.py             # Tree node with UCB1 and PUCT scoring
+│   ├── search.py           # MCTS with random rollouts + neural net
+│   ├── batch_search.py     # Batched MCTS for parallel self-play
+│   ├── cpp_search.py       # Python interface to C++ single/multi-threaded MCTS
+│   └── benchmark.py        # MCTS vs random agent arena
+├── model/                  # Neural network
+│   ├── network.py          # ResNet with policy + value heads
+│   └── features.py         # Board -> 8-channel tensor + symmetry augmentation
+├── training/               # Self-play training loop
+│   ├── config.py           # All hyperparameters
+│   ├── self_play.py        # Generate games via MCTS + net
+│   ├── parallel_self_play.py # Batched multi-game self-play
+│   ├── trainer.py          # Training loop with checkpointing
+│   ├── replay_buffer.py    # Position storage + sampling
+│   └── logger.py           # TensorBoard logging
+├── evaluation/             # Model comparison + play interface
+│   ├── arena.py            # Pit two models against each other
+│   └── server.py           # FastAPI backend for web UI
+├── web/                    # React + TypeScript frontend
 │   └── src/
-│       ├── App.tsx     # Game setup + controls
-│       ├── Board.tsx   # Interactive SVG Go board
-│       └── api.ts      # API client
+│       ├── App.tsx         # Game setup + controls
+│       ├── Board.tsx       # Interactive SVG Go board
+│       └── api.ts          # API client
+├── src/                    # C++ acceleration (pybind11)
+│   ├── board.h / board.cpp           # Go board engine
+│   ├── mcts_node.h                   # Tree node with PUCT + virtual loss
+│   ├── mcts.h / mcts.cpp             # Single-threaded + batched MCTS
+│   ├── parallel_mcts.h / .cpp        # Multi-threaded MCTS with virtual loss
+│   ├── batch_queue.h                 # Promise/future GPU batch queue
+│   ├── features.h / features.cpp     # Feature extraction + symmetry
+│   └── bindings.cpp                  # pybind11 Python bindings
 ├── docs/               # Plain-English explanations of every component
+├── CMakeLists.txt      # C++ build config
+├── build_cpp.sh        # Build script for C++ module
 ├── train_local.py      # Local CPU training script (5x5, ~15 min)
 └── pyproject.toml      # Managed by uv
 ```
@@ -55,9 +68,10 @@ alphago-zero/
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.13+
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
-- Node.js 18+ (for the web UI)
+- CMake 3.16+ (for C++ acceleration)
+- Node.js 18+ (for the web UI, optional)
 
 ### Install
 
@@ -65,187 +79,258 @@ alphago-zero/
 git clone https://github.com/jungyeom/alphago-zero.git
 cd alphago-zero
 uv sync
-cd web && npm install && cd ..
 ```
 
-### Local test training (CPU, ~15 minutes)
+### Build C++ acceleration
 
-Train a small model on 5x5 to verify everything works:
+The C++ module provides the Go board engine and multi-threaded MCTS. Build it once:
+
+```bash
+./build_cpp.sh
+```
+
+Verify it works:
+
+```bash
+uv run python -c "import alphago_core; print('OK')"
+```
+
+### Run tests
+
+```bash
+# All tests
+uv run pytest
+
+# C++ multi-threaded MCTS tests specifically
+uv run pytest mcts/tests/test_parallel_mcts.py -v
+```
+
+---
+
+## End-to-end workflow: local machine (CPU)
+
+For testing the full pipeline on your laptop. Uses a 5x5 board with a tiny network.
+
+### Step 1: Train on 5x5
 
 ```bash
 uv run python train_local.py
 ```
 
-This runs 30 iterations of self-play + training on a 5x5 board with a small network. You'll see the loss decreasing each iteration. The trained model is saved to `checkpoints/model_final.pt`.
+This runs 30 iterations of self-play + training (~15 minutes on CPU). You'll see the loss decreasing each iteration. The trained model is saved to `checkpoints/model_final.pt`.
 
-### Play against the AI
-
-After training, start the backend and frontend:
+### Step 2: Play against it
 
 ```bash
 # Terminal 1: backend
 uv run python -m evaluation.server
 
 # Terminal 2: frontend
-cd web && npm run dev
+cd web && npm install && npm run dev
 ```
 
-Open `http://localhost:5173`, select the board size that matches your trained model, and play. The server auto-detects the latest checkpoint in `checkpoints/`.
+Open `http://localhost:5173`, select 5x5 board size, and play.
 
-## Training on a GPU (end-to-end guide)
+### Step 3: Train a larger board locally (optional)
 
-The local test uses a 5x5 board on CPU. For real 13x13 training, you need a GPU instance.
+For a 9x9 model on CPU with multi-threaded C++ MCTS:
 
-### Step 1: Create a GPU instance on RunPod
+```bash
+uv run python -m training.trainer \
+  --board-size 9 \
+  --num-iterations 30 \
+  --games-per-iter 20 \
+  --simulations 100 \
+  --search-threads 4 \
+  --use-cpp \
+  --device cpu
+```
 
-1. Create an account at [runpod.io](https://www.runpod.io) and add credit ($10-25 to start)
-2. Click **Pods** in the left sidebar, then **+ Deploy**
-3. Select **RTX 4090** (24GB) — best speed/cost for our model size
-4. Choose the **RunPod PyTorch 2.x** template
-5. Set **Container Disk** to 20GB, **Volume Disk** to 5GB
-6. Click **Deploy On-Demand** (or **Spot** for ~$0.20/hr with possible interruption)
+The `--search-threads 4` flag enables multi-threaded MCTS, which gives ~2x speedup on CPU by overlapping C++ tree operations with neural net evaluation.
+
+---
+
+## End-to-end workflow: GPU instance
+
+For real 9x9 or 13x13 training with multi-threaded MCTS and GPU acceleration.
+
+### Step 1: Create a GPU instance
+
+We recommend [RunPod](https://www.runpod.io):
+
+1. Create an account and add credit ($10-25 to start)
+2. Click **Pods** > **+ Deploy**
+3. Select a GPU and the **RunPod PyTorch 2.x** template
+4. Set **Container Disk** to 20GB, **Volume Disk** to 5GB
+5. Click **Deploy On-Demand** (or **Spot** for lower cost with possible interruption)
 
 | GPU | VRAM | On-demand | Spot | Best for |
 |-----|------|-----------|------|----------|
 | **RTX 4090** | 24GB | $0.34/hr | $0.20/hr | Best speed-per-dollar |
-| RTX 4070 Ti | 12GB | $0.19/hr | $0.10/hr | Budget option |
 | RTX 3090 | 24GB | $0.22/hr | $0.11/hr | Cheaper, slightly slower |
+| RTX 4070 Ti | 12GB | $0.19/hr | $0.10/hr | Budget option |
 
-### Step 2: Connect and set up
+### Step 2: Set up the environment
 
 Once the pod is running, click **Connect** and open **Web Terminal** (or SSH).
 
 ```bash
-# Clone the repo (use mcts-optimizer branch for C++ acceleration)
+# Clone and checkout the branch with multi-threaded C++ MCTS
 git clone https://github.com/jungyeom/alphago-zero.git
 cd alphago-zero
-git checkout mcts-optimizer
+git checkout cplus-multi-mcts
 
-# Install dependencies
+# Install uv and project dependencies
 pip install uv
 uv sync
 
-# Build C++ acceleration (15x faster board operations)
+# Build C++ acceleration module
 ./build_cpp.sh
 
-# Verify GPU is available
-uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name())"
+# Verify everything works
+uv run python -c "import alphago_core; print('OK')"
+uv run python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name())"
 ```
 
-### Step 3: Start training
+### Step 3: Run a quick smoke test
 
-Run training inside `tmux` or `screen` so it survives SSH disconnection:
+Before a long training run, verify the full pipeline works:
+
+```bash
+uv run python -m training.trainer \
+  --board-size 9 \
+  --num-iterations 3 \
+  --games-per-iter 5 \
+  --simulations 50 \
+  --search-threads 4 \
+  --parallel-games 16 \
+  --use-cpp \
+  --device cuda
+```
+
+This should complete in under a minute. If it finishes without errors, you're ready for a real training run.
+
+### Step 4: Start training
+
+Run inside `tmux` so it survives SSH disconnection:
 
 ```bash
 tmux new -s train
+```
 
-# Recommended 13x13 config for ~$5-10 budget
+**9x9 training** (~4-8 hours on RTX 4090, ~$1-2 spot):
+
+```bash
+uv run python -m training.trainer \
+  --board-size 9 \
+  --num-iterations 150 \
+  --games-per-iter 80 \
+  --simulations 150 \
+  --search-threads 4 \
+  --parallel-games 128 \
+  --use-cpp \
+  --device cuda 2>&1 | tee training.log
+```
+
+**13x13 training** (~15-25 hours on RTX 4090, ~$3-5 spot):
+
+```bash
 uv run python -m training.trainer \
   --board-size 13 \
   --num-iterations 100 \
   --games-per-iter 50 \
   --simulations 150 \
+  --search-threads 4 \
   --parallel-games 128 \
   --use-cpp \
   --device cuda 2>&1 | tee training.log
-
-# Detach tmux: Ctrl+B then D
-# Reattach later: tmux attach -t train
 ```
 
-The `--parallel-games` flag controls how many self-play games run simultaneously, batching their GPU evaluations together. Higher values = better GPU utilization. Recommended: 64-128 on GPU, 4-16 on CPU.
-
-Other training configs:
+**13x13 stronger** (~30-50 hours on RTX 4090, ~$6-10 spot):
 
 ```bash
-# Budget-conscious (~$3-5)
 uv run python -m training.trainer \
-  --board-size 13 --num-iterations 50 --games-per-iter 30 \
-  --simulations 100 --parallel-games 64 --use-cpp --device cuda
-
-# Stronger model (~$10-17)
-uv run python -m training.trainer \
-  --board-size 13 --num-iterations 200 --games-per-iter 100 \
-  --simulations 200 --parallel-games 128 --use-cpp --device cuda
-
-# 9x9 (faster, good for experimentation)
-uv run python -m training.trainer \
-  --board-size 9 --num-iterations 150 --games-per-iter 80 \
-  --simulations 150 --parallel-games 128 --use-cpp --device cuda
+  --board-size 13 \
+  --num-iterations 200 \
+  --games-per-iter 100 \
+  --simulations 200 \
+  --search-threads 8 \
+  --parallel-games 128 \
+  --use-cpp \
+  --device cuda 2>&1 | tee training.log
 ```
 
-### Step 4: Monitor training
+Detach tmux: `Ctrl+B` then `D`. Reattach later: `tmux attach -t train`.
 
-In a second terminal (or another tmux pane):
+#### Key flags explained
+
+| Flag | Purpose | Recommended |
+|------|---------|-------------|
+| `--search-threads N` | C++ worker threads per MCTS search. Higher = faster per-move search via virtual loss + GPU batching. | 4-8 on GPU |
+| `--parallel-games N` | Simultaneous self-play games with batched inference. Higher = better GPU utilization. | 64-128 on GPU |
+| `--use-cpp` | Use C++ board engine + MCTS instead of pure Python. | Always on GPU |
+| `--simulations N` | MCTS iterations per move. More = stronger play, slower training. | 100-200 |
+
+### Step 5: Monitor training
+
+In a second tmux pane (`Ctrl+B` then `%`):
 
 ```bash
-# Watch live loss values
+# Watch live progress
 tail -f training.log | grep "Epoch\|Self-play\|Iteration"
 
-# Or launch TensorBoard dashboard
+# Or launch TensorBoard
 uv run tensorboard --logdir runs/ --bind_all
 ```
 
-If using TensorBoard, forward port 6006 from your laptop:
+For TensorBoard, forward port 6006 from your laptop:
 ```bash
-# From your laptop
 ssh -L 6006:localhost:6006 root@<pod-ip> -p <port>
 ```
-Then open `http://localhost:6006` to see live loss curves.
+Then open `http://localhost:6006`.
 
 What healthy training looks like:
 - **Policy loss**: decreasing from ~3.2 to ~1.5 over 100 iterations
 - **Value loss**: decreasing from ~1.0 to ~0.3, then stabilizing
 - **Game length**: increasing from ~60 to ~200 as the model learns
 
-See [docs/monitoring_training.md](docs/monitoring_training.md) for detailed troubleshooting.
+### Step 6: Resume if interrupted
 
-### Step 5: Resume if interrupted
-
-If the instance stops (spot reclaimed, SSH drops, etc.), your checkpoints are saved:
+Checkpoints are saved every 5 iterations (~5MB each):
 
 ```bash
-# Resume from the latest checkpoint
 uv run python -m training.trainer \
   --resume checkpoints/model_iter_0050.pt \
-  --parallel-games 128 --use-cpp --device cuda
+  --search-threads 4 \
+  --parallel-games 128 \
+  --use-cpp \
+  --device cuda
 ```
 
-Checkpoints are saved every 5 iterations (~5MB each). At most you lose the current in-progress iteration.
+### Step 7: Download your model and play
 
-### Step 6: Download your model
-
-When training finishes, copy the checkpoint to your laptop:
+From your laptop:
 
 ```bash
-# From your laptop (RunPod shows SSH details in the Connect tab)
+# Download (RunPod shows SSH details in the Connect tab)
 scp -P <port> root@<pod-ip>:~/alphago-zero/checkpoints/model_final.pt ./checkpoints/
 ```
 
 **Stop the pod** to stop billing.
 
-### Step 7: Play against it locally
-
-Back on your laptop, no GPU needed:
+Then play against it locally (no GPU needed):
 
 ```bash
-# Terminal 1: start the backend (auto-loads checkpoints/model_final.pt)
+# Terminal 1
 uv run python -m evaluation.server
 
-# Terminal 2: start the frontend
+# Terminal 2
 cd web && npm run dev
 ```
 
-Open `http://localhost:5173`, select 13x13, and play. CPU inference takes 1-5 seconds per AI move.
+Open `http://localhost:5173`, select the board size that matches your model, and play. CPU inference takes 1-5 seconds per AI move.
 
-### Compute budget estimates
-
-| Board | Config | Est. time (RTX 4090) | Est. cost (spot) |
-|-------|--------|---------------------|-----------------|
-| 5x5 | 30 iters, 10 games, 50 sims | ~15 min | free (CPU) |
-| 9x9 | 150 iters, 80 games, 150 sims | ~8-15 hrs | $2-3 |
-| 13x13 | 100 iters, 50 games, 150 sims | ~15-25 hrs | $3-5 |
-| 13x13 | 200 iters, 100 games, 200 sims | ~30-50 hrs | $6-10 |
+---
 
 ## Comparing models
 
@@ -259,6 +344,19 @@ uv run python -m evaluation.arena \
 ```
 
 The newer model should win >55% of games if training is working.
+
+---
+
+## Compute budget estimates
+
+| Board | Config | Est. time (RTX 4090) | Est. cost (spot) |
+|-------|--------|---------------------|-----------------|
+| 5x5 | 30 iters, 10 games, 50 sims | ~15 min | free (CPU) |
+| 9x9 | 150 iters, 80 games, 150 sims, 4 threads | ~4-8 hrs | $1-2 |
+| 13x13 | 100 iters, 50 games, 150 sims, 4 threads | ~15-25 hrs | $3-5 |
+| 13x13 | 200 iters, 100 games, 200 sims, 8 threads | ~30-50 hrs | $6-10 |
+
+---
 
 ## Architecture details
 
@@ -275,6 +373,14 @@ The newer model should win >55% of games if training is working.
 - **Dirichlet noise** at root for exploration (alpha=0.1 for 13x13)
 - **Temperature schedule**: exploratory for first 15 moves, then deterministic
 - No random rollouts — the neural network directly evaluates leaf positions
+
+### Multi-threaded C++ MCTS
+
+- **N worker threads** explore the same MCTS tree concurrently using **virtual loss** to diversify exploration
+- **1 evaluator thread** collects leaf positions into batches and calls the GPU for inference
+- **Batch queue** with promise/future pattern decouples workers from the evaluator
+- **GIL management**: workers run in pure C++ (no GIL), evaluator acquires GIL only during the Python neural net callback
+- ~2.4x speedup on CPU (4 threads), higher on GPU due to better batch utilization
 
 ### Training
 

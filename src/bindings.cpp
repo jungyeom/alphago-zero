@@ -92,13 +92,20 @@ PYBIND11_MODULE(alphago_core, m) {
         .def_readwrite("batch_timeout_us", &MCTSConfig::batch_timeout_us)
         .def_readwrite("virtual_loss_value", &MCTSConfig::virtual_loss_value);
 
+    // ── Parallel Stats ─────────────────────────────────────────────
+    py::class_<ParallelStats>(m, "ParallelStats")
+        .def_readonly("sims_per_thread", &ParallelStats::sims_per_thread)
+        .def_readonly("num_batches", &ParallelStats::num_batches)
+        .def_readonly("total_batch_items", &ParallelStats::total_batch_items);
+
     // ── MCTS Result ────────────────────────────────────────────────
     py::class_<MCTSResult>(m, "MCTSResult")
         .def_readonly("best_move", &MCTSResult::best_move)
         .def_property_readonly("policy_vec", [](const MCTSResult& r) {
             return py::array_t<float>(r.policy_vec.size(), r.policy_vec.data());
         })
-        .def_readonly("total_visits", &MCTSResult::total_visits);
+        .def_readonly("total_visits", &MCTSResult::total_visits)
+        .def_readonly("parallel_stats", &MCTSResult::parallel_stats);
 
     // ── NetOutput ──────────────────────────────────────────────────
     py::class_<NetOutput>(m, "NetOutput")

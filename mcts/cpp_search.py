@@ -260,6 +260,8 @@ def get_move_probabilities_parallel_cpp(
     num_threads: int = 4,
     temperature: float = 1.0,
     device: torch.device | None = None,
+    min_batch_size: int = 4,
+    max_batch_size: int = 16,
 ) -> tuple[list[tuple[tuple[int, int] | None, float]], np.ndarray]:
     """
     Multi-threaded C++ MCTS returning same format as get_move_probabilities_with_net.
@@ -268,6 +270,8 @@ def get_move_probabilities_parallel_cpp(
         board, color_to_play, net,
         num_simulations=num_simulations,
         num_threads=num_threads,
+        min_batch_size=min_batch_size,
+        max_batch_size=max_batch_size,
         temperature=temperature,
         device=device,
     )
