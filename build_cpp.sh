@@ -6,7 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Find tools
-CMAKE=$(which cmake 2>/dev/null || echo /opt/homebrew/bin/cmake)
+CMAKE=$(which cmake 2>/dev/null)
+if [ -z "$CMAKE" ]; then
+    echo "Error: cmake not found. Install with: apt install cmake (Linux) or brew install cmake (macOS)"
+    exit 1
+fi
 PYBIND11_DIR=$(uv run python -c 'import pybind11; print(pybind11.get_cmake_dir())' 2>/dev/null)
 PYTHON_EXE=$(uv run python -c 'import sys; print(sys.executable)' 2>/dev/null)
 EXT_SUFFIX=$(uv run python -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))' 2>/dev/null)
