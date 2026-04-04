@@ -319,6 +319,10 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
             path = save_checkpoint(net, optimizer, iteration, config)
             print(f"\n  Saved checkpoint: {path}")
 
+        # Free CUDA cache to prevent memory fragmentation
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
         iter_time = time.time() - iter_start
         print(f"\n  Iteration time: {iter_time:.1f}s")
         logger.log_iteration_time(iteration, iter_time, sp_time, train_time)
