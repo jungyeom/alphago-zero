@@ -8,6 +8,7 @@ This is the core AlphaZero training pipeline. Each iteration:
   4. Periodically evaluate against previous versions
 """
 
+import gc
 import os
 import time
 import numpy as np
@@ -281,6 +282,10 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
 
         logger.log_self_play(iteration, len(games), avg_moves, black_win_rate, sp_time)
         logger.log_buffer(iteration, len(buffer), positions_added)
+
+        # Free self-play game data (large numpy arrays)
+        del games
+        gc.collect()
 
         # 3. Train the network
         if len(buffer) >= config.min_buffer_size:

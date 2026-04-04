@@ -209,21 +209,41 @@ uv run python -m training.trainer \
   --device cuda
 ```
 
-### All CLI flags
+### CLI flags reference
 
-| Flag | Default | Description |
+| Flag | Default | What it does |
 |------|---------|-------------|
-| `--board-size` | 13 | Board size |
-| `--num-iterations` | 200 | Total training iterations |
-| `--games-per-iter` | 100 | Self-play games per iteration |
-| `--simulations` | 200 | MCTS sims per move |
-| `--batch-size` | 256 | Training batch size |
-| `--lr` | 0.01 | Learning rate |
-| `--search-threads` | 1 | C++ MCTS worker threads per game (try 4-8 on GPU) |
-| `--parallel-games` | 16 | Simultaneous self-play games (try 64-128 on GPU) |
-| `--use-cpp` | off | Enable C++ board engine + MCTS |
-| `--device` | auto | cpu, cuda, or mps |
-| `--resume` | none | Checkpoint path to resume from |
+| `--board-size` | 13 | Go board dimensions (5, 9, 13, or 19). Larger = exponentially more compute needed. |
+| `--num-iterations` | 200 | How many self-play -> train cycles to run. Each iteration generates games, adds positions to the buffer, then trains. More iterations = stronger model. |
+| `--games-per-iter` | 100 | Self-play games generated per iteration. More games = more diverse training data per cycle, but slower iterations. |
+| `--simulations` | 200 | MCTS iterations per move. Each simulation walks the tree, evaluates a leaf with the neural net, and backs up. More sims = stronger moves but slower self-play. AlphaGo Zero used 1600. |
+| `--batch-size` | 256 | Training batch size for SGD. How many positions are sampled from the replay buffer per gradient step. Larger = smoother gradients, more GPU memory. |
+| `--lr` | 0.01 | Learning rate for SGD optimizer. Decays by 10x at iterations 100 and 200. |
+| `--search-threads` | 1 | C++ MCTS worker threads per move. Each thread explores a different tree branch using virtual loss. More threads = faster per-move search by overlapping tree work with GPU eval. Diminishing returns past 8 due to global tree mutex. Recommended: 4-8 on GPU. |
+| `--parallel-games` | 16 | Simultaneous self-play games managed in the game loop. With the C++ path, games are processed sequentially per round. With the Python fallback, leaf evaluations are batched across all games into one GPU call. On CPU this has little effect; on GPU it improves throughput. |
+| `--use-cpp` | off | Enables the C++ board engine + MCTS instead of pure Python. ~15x faster board operations. Required for `--search-threads` to have any effect. |
+| `--device` | auto | `cpu`, `cuda`, or `mps`. Auto-detects GPU if available. |
+| `--resume` | none | Path to a checkpoint file (e.g. `checkpoints/model_iter_0050.pt`) to resume training from. Picks up iteration count, model weights, and optimizer state. |
+
+### Config-only parameters
+
+These are set in `TrainingConfig` directly (in `training/config.py` or `train_local.py`) and not exposed as CLI flags:
+
+| Config field | Default | What it does |
+|-------------|---------|-------------|
+| `c_puct` | 1.5 | Exploration constant in PUCT formula. Higher = more exploration of unvisited moves, lower = more exploitation of known good moves. |
+| `dirichlet_alpha` | 0.1 | Noise parameter added to root priors. Roughly `10 / board_size^2`. Forces exploration of moves the network wouldn't normally consider. |
+| `dirichlet_weight` | 0.25 | Mix ratio: 75% network prior + 25% Dirichlet noise at the root. |
+| `temp_threshold` | 15 | First N moves use temperature=1.0 (sample proportionally to visit counts for diverse openings). After that, temperature drops to `temp_final`. |
+| `temp_final` | 0.1 | Temperature after `temp_threshold` moves. Nearly deterministic -- plays the most-visited move. |
+| `replay_buffer_size` | 50,000 | Max positions stored. Old positions are dropped when full. |
+| `min_buffer_size` | 2,000 | Don't start training until the buffer has this many positions. Avoids training on too few examples early on. |
+| `training_epochs` | 3 | Passes over sampled data per iteration. |
+| `weight_decay` | 1e-4 | L2 regularization strength. Prevents overfitting. |
+| `use_mixed_precision` | True | fp16 training on CUDA. ~2x faster training, negligible quality impact. No effect on CPU. |
+| `save_every_n_iterations` | 5 | Checkpoint frequency. Each checkpoint is ~5MB. |
+| `min_batch_size` | 4 | Min positions the C++ evaluator thread collects before running a GPU forward pass. |
+| `max_batch_size` | 16 | Max positions per GPU batch in the C++ MCTS batch queue. |
 
 ---
 
