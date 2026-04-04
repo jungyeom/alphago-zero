@@ -4,16 +4,17 @@ Replay buffer for storing self-play training data.
 Each entry is a position from a self-play game:
   (features, policy_target, value_target)
 
-The buffer has a fixed maximum size. When full, oldest entries are removed.
+Uses pre-allocated numpy arrays to avoid memory fragmentation
+from thousands of individual array objects.
 """
 
 import numpy as np
-from collections import deque
 
 
 class ReplayBuffer:
     """
-    Fixed-size buffer that stores self-play positions.
+    Fixed-size ring buffer that stores self-play positions
+    in pre-allocated contiguous numpy arrays.
 
     Stores:
       - features: board state tensor (C, H, W)
@@ -21,17 +22,28 @@ class ReplayBuffer:
       - value: game outcome from current player's perspective (-1 or +1)
     """
 
-    def __init__(self, max_size: int = 50_000):
+    def __init__(self, max_size: int = 50_000, board_size: int = 13, num_features: int = 8):
         self.max_size = max_size
-        self.features: deque[np.ndarray] = deque(maxlen=max_size)
-        self.policies: deque[np.ndarray] = deque(maxlen=max_size)
-        self.values: deque[float] = deque(maxlen=max_size)
+        self.board_size = board_size
+        self.num_features = num_features
+        self.num_moves = board_size * board_size + 1
+
+        # Pre-allocate contiguous arrays
+        self._features = np.zeros((max_size, num_features, board_size, board_size), dtype=np.float32)
+        self._policies = np.zeros((max_size, self.num_moves), dtype=np.float32)
+        self._values = np.zeros(max_size, dtype=np.float32)
+
+        self._size = 0       # current number of valid entries
+        self._index = 0      # next write position (ring buffer)
 
     def push(self, features: np.ndarray, policy: np.ndarray, value: float) -> None:
         """Add a single position to the buffer."""
-        self.features.append(features)
-        self.policies.append(policy)
-        self.values.append(value)
+        self._features[self._index] = features
+        self._policies[self._index] = policy
+        self._values[self._index] = value
+
+        self._index = (self._index + 1) % self.max_size
+        self._size = min(self._size + 1, self.max_size)
 
     def push_game(
         self,
@@ -90,18 +102,18 @@ class ReplayBuffer:
             - policies: (batch, num_moves)
             - values: (batch, 1)
         """
-        indices = np.random.choice(len(self), size=min(batch_size, len(self)), replace=False)
+        indices = np.random.choice(self._size, size=min(batch_size, self._size), replace=False)
 
-        batch_features = np.stack([self.features[i] for i in indices])
-        batch_policies = np.stack([self.policies[i] for i in indices])
-        batch_values = np.array([self.values[i] for i in indices], dtype=np.float32).reshape(-1, 1)
+        # Slicing pre-allocated arrays — no new allocations
+        batch_features = self._features[indices]
+        batch_policies = self._policies[indices]
+        batch_values = self._values[indices].reshape(-1, 1)
 
         return batch_features, batch_policies, batch_values
 
     def __len__(self) -> int:
-        return len(self.features)
+        return self._size
 
     def clear(self) -> None:
-        self.features.clear()
-        self.policies.clear()
-        self.values.clear()
+        self._size = 0
+        self._index = 0

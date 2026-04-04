@@ -227,7 +227,7 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
     scaler = GradScaler() if config.use_mixed_precision and device.type == "cuda" else None
 
     # Replay buffer
-    buffer = ReplayBuffer(max_size=config.replay_buffer_size)
+    buffer = ReplayBuffer(max_size=config.replay_buffer_size, board_size=config.board_size)
 
     # Logger (TensorBoard + CSV)
     from training.logger import TrainingLogger
