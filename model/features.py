@@ -50,14 +50,17 @@ def board_to_features(board: Board, color_to_play: int) -> np.ndarray:
     opp = OPPONENT[color_to_play]
     features = np.zeros((NUM_FEATURES, size, size), dtype=np.float32)
 
+    # Cache grid to avoid repeated allocations (CppBoard.grid creates a copy each access)
+    grid = board.grid
+
     # Plane 0: current player's stones
-    features[0] = (board.grid == color_to_play).astype(np.float32)
+    features[0] = (grid == color_to_play).astype(np.float32)
 
     # Plane 1: opponent's stones
-    features[1] = (board.grid == opp).astype(np.float32)
+    features[1] = (grid == opp).astype(np.float32)
 
     # Plane 2: empty points
-    features[2] = (board.grid == EMPTY).astype(np.float32)
+    features[2] = (grid == EMPTY).astype(np.float32)
 
     # Plane 3: last move (one-hot)
     if board.move_history:
@@ -75,7 +78,7 @@ def board_to_features(board: Board, color_to_play: int) -> np.ndarray:
     visited = np.zeros((size, size), dtype=bool)
     for r in range(size):
         for c in range(size):
-            if board.grid[r, c] == EMPTY or visited[r, c]:
+            if grid[r, c] == EMPTY or visited[r, c]:
                 continue
             stones, liberties = board._group(r, c)
             lib_count = len(liberties)

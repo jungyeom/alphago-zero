@@ -1,0 +1,4 @@
+/root/alphago-zero/training/trainer.py:227: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = GradScaler() if config.use_mixed_precision and device.type == "cuda" else None
+/root/alphago-zero/training/trainer.py:66: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with autocast():

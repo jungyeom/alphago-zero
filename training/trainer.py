@@ -8,14 +8,35 @@ This is the core AlphaZero training pipeline. Each iteration:
   4. Periodically evaluate against previous versions
 """
 
+import ctypes
 import gc
 import os
+import resource
 import time
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
+
+# Force glibc to return freed C++ heap memory to the OS
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    def _malloc_trim():
+        _libc.malloc_trim(0)
+except (OSError, AttributeError):
+    def _malloc_trim():
+        pass
+
+
+def _get_memory_mb() -> dict:
+    """Get current memory usage in MB."""
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # KB → MB
+    info = {"rss_mb": rss}
+    if torch.cuda.is_available():
+        info["cuda_allocated_mb"] = torch.cuda.memory_allocated() / (1024 * 1024)
+        info["cuda_reserved_mb"] = torch.cuda.memory_reserved() / (1024 * 1024)
+    return info
 
 from model.network import create_network
 from training.config import TrainingConfig
@@ -236,6 +257,11 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
     print(f"Logging to: {log_dir}/")
     print(f"  View dashboard: tensorboard --logdir runs/")
 
+    # Limit glibc malloc arenas to prevent C++ thread memory bloat.
+    # Each C++ MCTS search_parallel creates/destroys worker threads;
+    # without this, glibc creates a new arena per thread that never shrinks.
+    os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+
     # Training loop
     for iteration in range(start_iteration, config.num_iterations + 1):
         iter_start = time.time()
@@ -283,9 +309,18 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
         logger.log_self_play(iteration, len(games), avg_moves, black_win_rate, sp_time)
         logger.log_buffer(iteration, len(buffer), positions_added)
 
-        # Free self-play game data (large numpy arrays)
+        # Free self-play game data and reclaim C++ heap memory
         del games
         gc.collect()
+        _malloc_trim()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        mem = _get_memory_mb()
+        mem_parts = [f"RSS={mem['rss_mb']:.0f}MB"]
+        if "cuda_allocated_mb" in mem:
+            mem_parts.append(f"CUDA={mem['cuda_allocated_mb']:.0f}MB")
+        print(f"  Memory after self-play cleanup: {', '.join(mem_parts)}")
 
         # 3. Train the network
         if len(buffer) >= config.min_buffer_size:
@@ -322,6 +357,8 @@ def train(config: TrainingConfig | None = None, resume_from: str | None = None) 
         # Free CUDA cache to prevent memory fragmentation
         if device.type == "cuda":
             torch.cuda.empty_cache()
+
+        gc.collect()
 
         iter_time = time.time() - iter_start
         print(f"\n  Iteration time: {iter_time:.1f}s")

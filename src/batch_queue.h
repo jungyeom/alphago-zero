@@ -34,7 +34,7 @@ public:
     // Called by worker threads. Blocks until result is ready.
     NetOutput submit(const Board& board, uint8_t color) {
         EvalRequest req;
-        req.board = board;  // copy
+        req.board = board.copy_light();  // lightweight copy (skip position_history_)
         req.color = color;
         auto future = req.promise.get_future();
 

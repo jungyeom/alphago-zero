@@ -10,7 +10,7 @@ import torch
 
 from go_engine.board import BLACK, WHITE, OPPONENT
 from go_engine.game import Game
-from model.features import board_to_features
+from model.features import board_to_features, board_to_features_cpp
 from mcts.search import get_move_probabilities_with_net
 from training.config import TrainingConfig
 
@@ -60,8 +60,12 @@ def play_self_play_game(
         else:
             temperature = config.temp_final
 
-        # Record features BEFORE the move
-        features = board_to_features(game.board, color)
+        # Record features BEFORE the move (use C++ extraction when available)
+        use_cpp = getattr(config, 'use_cpp', False)
+        if use_cpp:
+            features = board_to_features_cpp(game.board, color)
+        else:
+            features = board_to_features(game.board, color)
 
         # Run MCTS to get improved policy
         num_threads = getattr(config, 'num_search_threads', 1)

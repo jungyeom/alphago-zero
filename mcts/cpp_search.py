@@ -58,20 +58,39 @@ def _make_batch_eval_fn(net: torch.nn.Module, board_size: int, device: torch.dev
     Create a batch evaluation callback for the C++ MCTS.
 
     Evaluates multiple positions in a single GPU forward pass.
+    Uses a pre-allocated CPU tensor buffer to avoid repeated allocations
+    that fragment the C heap.
     """
+    from model.features import NUM_FEATURES
+
+    # Pre-allocate CPU batch buffer (reused across calls to avoid malloc churn).
+    # Using numpy backing array so C++ can write directly into it via board_to_features_into.
+    max_batch = 32
+    _np_buf = np.zeros((max_batch, NUM_FEATURES, board_size, board_size), dtype=np.float32)
+    _batch_buf = torch.from_numpy(_np_buf)  # shares memory with _np_buf
+    if device.type == "cuda":
+        _gpu_buf = torch.zeros((max_batch, NUM_FEATURES, board_size, board_size),
+                               dtype=torch.float32, device=device)
+    _has_features_into = hasattr(ac, 'board_to_features_into')
+
     def batch_eval_fn(cboards, colors):
         """Batch position evaluation."""
         n = len(cboards)
         if n == 0:
             return []
 
-        # Extract features for all positions
-        tensors = []
-        for i in range(n):
-            features = ac.board_to_features_cpp(cboards[i], colors[i])
-            tensors.append(torch.from_numpy(features).unsqueeze(0))
-
-        batch = torch.cat(tensors, dim=0).to(device)
+        # Extract features directly into pre-allocated buffer (zero-copy)
+        if n <= max_batch and _has_features_into:
+            for i in range(n):
+                ac.board_to_features_into(cboards[i], colors[i], _np_buf, i)
+            batch = _batch_buf[:n].to(device, non_blocking=True)
+        else:
+            # Fallback for oversized batches
+            tensors = []
+            for i in range(n):
+                features = ac.board_to_features_cpp(cboards[i], colors[i])
+                tensors.append(torch.from_numpy(features).unsqueeze(0))
+            batch = torch.cat(tensors, dim=0).to(device)
 
         net.eval()
         with torch.no_grad():

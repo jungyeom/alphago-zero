@@ -29,10 +29,16 @@ inline Move board_move(int r, int c) { return {r, c}; }
 
 class Board {
 public:
-    explicit Board(int size = 13);
+    explicit Board(int size = 13, bool with_history = true);
 
     Board(const Board& other);
     Board& operator=(const Board& other);
+
+    /// Lightweight copy for MCTS simulations: disables position_history_
+    /// tracking entirely. This eliminates ALL heap allocations per Board copy
+    /// (position_history_ uses unordered_set which allocates from the heap).
+    /// Superko detection is disabled on light copies.
+    Board copy_light() const;
 
     int size() const { return size_; }
     uint8_t at(int r, int c) const { return grid_[r][c]; }
@@ -69,7 +75,12 @@ public:
     GroupInfo find_group(int r, int c) const;
     int count_liberties(int r, int c) const;
 
+    /// Fast liberty check using stack-allocated arrays (no heap allocation).
+    /// Returns true if the group at (r,c) has at least `min_libs` liberties.
+    bool has_liberties(int r, int c, int min_libs = 1) const;
+
     double komi = 6.5;
+    bool track_history = true;  // false for MCTS simulation boards (no heap alloc)
 
 private:
     int size_;

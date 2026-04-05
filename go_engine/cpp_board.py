@@ -110,11 +110,32 @@ class CppBoard:
 
     def _group(self, row: int, col: int):
         """Compatibility: returns (stones, liberties) sets."""
-        # Use the Python implementation for this rarely-called method
-        from go_engine.board import Board as PyBoard
-        py = PyBoard(size=self._size)
-        py.grid = self.grid.copy()
-        return py._group(row, col)
+        from collections import deque
+        grid = self.grid  # single grid copy
+        color = grid[row, col]
+        if color == EMPTY:
+            return set(), set()
+
+        stones = set()
+        liberties = set()
+        queue = deque([(row, col)])
+        stones.add((row, col))
+
+        while queue:
+            r, c = queue.popleft()
+            for nr, nc in [(r-1, c), (r+1, c), (r, c-1), (r, c+1)]:
+                if not (0 <= nr < self._size and 0 <= nc < self._size):
+                    continue
+                if (nr, nc) in stones:
+                    continue
+                cell = grid[nr, nc]
+                if cell == EMPTY:
+                    liberties.add((nr, nc))
+                elif cell == color:
+                    stones.add((nr, nc))
+                    queue.append((nr, nc))
+
+        return stones, liberties
 
     def _liberties(self, row: int, col: int) -> int:
         _, libs = self._group(row, col)

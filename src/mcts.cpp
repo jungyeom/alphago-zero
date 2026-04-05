@@ -1,4 +1,5 @@
 #include "mcts.h"
+#include "eval_thread.h"
 #include <random>
 #include <cmath>
 #include <algorithm>
@@ -8,8 +9,11 @@
 namespace alphago {
 
 static thread_local std::mt19937 rng(42 + std::hash<std::thread::id>{}(std::this_thread::get_id()));
+static std::mutex tree_mutex;  // global mutex for tree operations in parallel mode
 
-MCTSSearch::MCTSSearch(MCTSConfig config) : config_(config) {}
+MCTSSearch::MCTSSearch(MCTSConfig config) : config_(config), node_pool_(8192) {
+    // Lazy-create evaluator on first search_parallel call
+}
 
 void MCTSSearch::expand_node(
     MCTSNode* node,
@@ -56,10 +60,68 @@ void MCTSSearch::expand_node(
     }
 }
 
-void MCTSSearch::add_dirichlet_noise(MCTSNode* root) {
-    if (root->children.empty() || config_.dirichlet_alpha <= 0) return;
+void MCTSSearch::expand_node_pooled(
+    MCTSNode* node,
+    const Board& board,
+    uint8_t color,
+    const std::vector<float>& policy,
+    float /*value*/,
+    NodePool& pool
+) {
+    auto legal = board.legal_moves(color);
+    int size = board.size();
+    int num_moves = size * size + 1;
 
-    int n = static_cast<int>(root->children.size());
+    std::vector<float> masked(num_moves, 0.0f);
+    for (auto& m : legal) {
+        int idx = m.is_pass() ? num_moves - 1 : m.row * size + m.col;
+        if (idx < static_cast<int>(policy.size())) {
+            masked[idx] = policy[idx];
+        }
+    }
+
+    float sum = 0.0f;
+    for (float v : masked) sum += v;
+    if (sum > 1e-8f) {
+        for (float& v : masked) v /= sum;
+    } else {
+        float uniform = 1.0f / static_cast<float>(legal.size());
+        for (auto& m : legal) {
+            int idx = m.is_pass() ? num_moves - 1 : m.row * size + m.col;
+            masked[idx] = uniform;
+        }
+    }
+
+    for (auto& m : legal) {
+        int idx = m.is_pass() ? num_moves - 1 : m.row * size + m.col;
+        MCTSNode* child = pool.alloc();
+        child->move = m;
+        child->parent = node;
+        child->color = color;
+        child->prior = masked[idx];
+        node->children_raw.push_back(child);
+    }
+}
+
+void MCTSSearch::expand_node_pooled_threadsafe(
+    MCTSNode* node,
+    const Board& board,
+    uint8_t color,
+    const std::vector<float>& policy,
+    float value,
+    NodePool& pool
+) {
+    std::lock_guard<std::mutex> lock(tree_mutex);
+    if (node->is_expanded()) {
+        return;
+    }
+    expand_node_pooled(node, board, color, policy, value, pool);
+}
+
+void MCTSSearch::add_dirichlet_noise(MCTSNode* root) {
+    int n = root->num_children();
+    if (n == 0 || config_.dirichlet_alpha <= 0) return;
+
     std::gamma_distribution<double> gamma(config_.dirichlet_alpha, 1.0);
 
     std::vector<double> noise(n);
@@ -72,8 +134,8 @@ void MCTSSearch::add_dirichlet_noise(MCTSNode* root) {
 
     double w = config_.dirichlet_weight;
     for (int i = 0; i < n; i++) {
-        root->children[i]->prior =
-            (1.0 - w) * root->children[i]->prior + w * noise[i];
+        MCTSNode* child = root->child_at(i);
+        child->prior = (1.0 - w) * child->prior + w * noise[i];
     }
 }
 
@@ -101,10 +163,6 @@ void MCTSSearch::backup(MCTSNode* node, double value) {
 }
 
 // ── Virtual Loss Methods (for parallel search) ────────────────────
-// These use the expand_mutex on each node for thread safety.
-// Not lock-free, but correct and simple.
-
-static std::mutex tree_mutex;  // global mutex for tree operations in parallel mode
 
 MCTSNode* MCTSSearch::select_with_virtual_loss(MCTSNode* root) {
     std::lock_guard<std::mutex> lock(tree_mutex);
@@ -163,7 +221,9 @@ Board MCTSSearch::reconstruct_board(
         cur = cur->parent;
     }
 
-    Board board(root_board); // copy
+    // Use copy_light: skips position_history_ to avoid heap allocation.
+    // MCTS simulation boards are short-lived and don't need full superko.
+    Board board = root_board.copy_light();
     uint8_t color = root_color;
     for (int i = static_cast<int>(path.size()) - 1; i >= 0; i--) {
         board.play(color, path[i]->move);
@@ -192,7 +252,9 @@ MCTSResult MCTSSearch::extract_result(MCTSNode* root, int board_size, double tem
     int num_moves = board_size * board_size + 1;
 
     std::vector<float> visits_vec(num_moves, 0.0f);
-    for (auto& child : root->children) {
+    int nc = root->num_children();
+    for (int i = 0; i < nc; i++) {
+        MCTSNode* child = root->child_at(i);
         int idx = child->move.is_pass() ? num_moves - 1 : child->move.row * board_size + child->move.col;
         visits_vec[idx] = static_cast<float>(child->visit_count);
     }

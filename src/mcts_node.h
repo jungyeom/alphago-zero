@@ -15,15 +15,34 @@ constexpr double DEFAULT_VIRTUAL_LOSS_VALUE = 1.0;
 struct MCTSNode {
     Move move;
     MCTSNode* parent = nullptr;
+
+    // Children storage:
+    // - `children` (unique_ptr): used for heap-allocated trees (standalone search)
+    // - `children_raw` (raw ptr): used with NodePool (pool manages lifetime)
+    // At most one should be non-empty at a time.
     std::vector<std::unique_ptr<MCTSNode>> children;
+    std::vector<MCTSNode*> children_raw;
+
     uint8_t color = 0;
     double prior = 0.0;
 
-    // Use plain types — thread safety is handled externally via mutexes
-    // in the parallel search path. Single-threaded search uses these directly.
     int visit_count = 0;
     double total_value = 0.0;
     int virtual_loss_count = 0;
+
+    // Whether this node uses pool-managed children
+    bool uses_pool() const { return !children_raw.empty() || (children.empty() && children_raw.empty()); }
+
+    // Unified child iteration
+    int num_children() const {
+        return children_raw.empty()
+            ? static_cast<int>(children.size())
+            : static_cast<int>(children_raw.size());
+    }
+
+    MCTSNode* child_at(int i) const {
+        return children_raw.empty() ? children[i].get() : children_raw[i];
+    }
 
     // Standard Q value (single-threaded, no virtual loss)
     double q_value() const {
@@ -56,17 +75,19 @@ struct MCTSNode {
         return q_value_vl(vloss_value) + exploration;
     }
 
-    bool is_expanded() const { return !children.empty(); }
+    bool is_expanded() const { return !children.empty() || !children_raw.empty(); }
     bool is_root() const { return parent == nullptr; }
 
     MCTSNode* best_child_puct(double c_puct = 1.5) const {
         MCTSNode* best = nullptr;
         double best_score = -std::numeric_limits<double>::infinity();
-        for (auto& child : children) {
-            double s = child->puct_score(c_puct);
+        int n = num_children();
+        for (int i = 0; i < n; i++) {
+            MCTSNode* c = child_at(i);
+            double s = c->puct_score(c_puct);
             if (s > best_score) {
                 best_score = s;
-                best = child.get();
+                best = c;
             }
         }
         return best;
@@ -75,11 +96,13 @@ struct MCTSNode {
     MCTSNode* best_child_puct_vl(double c_puct = 1.5, double vloss_value = DEFAULT_VIRTUAL_LOSS_VALUE) const {
         MCTSNode* best = nullptr;
         double best_score = -std::numeric_limits<double>::infinity();
-        for (auto& child : children) {
-            double s = child->puct_score_vl(c_puct, vloss_value);
+        int n = num_children();
+        for (int i = 0; i < n; i++) {
+            MCTSNode* c = child_at(i);
+            double s = c->puct_score_vl(c_puct, vloss_value);
             if (s > best_score) {
                 best_score = s;
-                best = child.get();
+                best = c;
             }
         }
         return best;
@@ -88,10 +111,12 @@ struct MCTSNode {
     MCTSNode* most_visited_child() const {
         MCTSNode* best = nullptr;
         int best_visits = -1;
-        for (auto& child : children) {
-            if (child->visit_count > best_visits) {
-                best_visits = child->visit_count;
-                best = child.get();
+        int n = num_children();
+        for (int i = 0; i < n; i++) {
+            MCTSNode* c = child_at(i);
+            if (c->visit_count > best_visits) {
+                best_visits = c->visit_count;
+                best = c;
             }
         }
         return best;

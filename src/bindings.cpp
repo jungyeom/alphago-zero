@@ -13,7 +13,8 @@
 #include "board.h"
 #include "mcts.h"
 #include "mcts_node.h"
-#include "features.h"
+#include "eval_thread.h"
+#include "go_features.h"
 
 namespace py = pybind11;
 using namespace alphago;
@@ -85,6 +86,19 @@ PYBIND11_MODULE(alphago_core, m) {
                     buf(ch, r, c) = f.data[ch][r][c];
         return arr;
     }, py::arg("board"), py::arg("color"), py::arg("last_r") = -1, py::arg("last_c") = -1);
+
+    // Zero-copy variant: write features into a pre-allocated output buffer.
+    // Avoids numpy array allocation in the hot MCTS eval loop.
+    m.def("board_to_features_into", [](const Board& board, uint8_t color,
+                                        py::array_t<float> out, int offset) {
+        auto f = board_to_features(board, color, pass_move());
+        int s = board.size();
+        auto buf = out.mutable_unchecked<4>(); // shape: (batch, C, H, W)
+        for (int ch = 0; ch < NUM_FEATURES; ch++)
+            for (int r = 0; r < s; r++)
+                for (int c = 0; c < s; c++)
+                    buf(offset, ch, r, c) = f.data[ch][r][c];
+    }, py::arg("board"), py::arg("color"), py::arg("out"), py::arg("offset"));
 
     // ── MCTS Config ────────────────────────────────────────────────
     py::class_<MCTSConfig>(m, "MCTSConfig")

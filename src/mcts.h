@@ -2,8 +2,13 @@
 
 #include "board.h"
 #include "mcts_node.h"
+#include "node_pool.h"
 #include <functional>
+#include <memory>
 #include <vector>
+
+// Forward declare to avoid include cycle
+namespace alphago { class PersistentEvaluator; }
 
 namespace alphago {
 
@@ -85,6 +90,16 @@ public:
         float value
     );
 
+    // Pool-based expand: allocates children from the pool instead of malloc
+    void expand_node_pooled(
+        MCTSNode* node,
+        const Board& board,
+        uint8_t color,
+        const std::vector<float>& policy,
+        float value,
+        NodePool& pool
+    );
+
     void add_dirichlet_noise(MCTSNode* root);
 
     Board reconstruct_board(
@@ -109,9 +124,19 @@ public:
         const std::vector<float>& policy,
         float value
     );
+    void expand_node_pooled_threadsafe(
+        MCTSNode* node,
+        const Board& board,
+        uint8_t color,
+        const std::vector<float>& policy,
+        float value,
+        NodePool& pool
+    );
 
 private:
     MCTSConfig config_;
+    NodePool node_pool_;  // Reusable pool for search_parallel
+    std::unique_ptr<PersistentEvaluator> evaluator_;  // Reusable evaluator thread
 
     MCTSNode* select(MCTSNode* root);
     void backup(MCTSNode* node, double value);

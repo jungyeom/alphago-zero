@@ -1,4 +1,4 @@
-#include "features.h"
+#include "go_features.h"
 #include <cstring>
 
 namespace alphago {

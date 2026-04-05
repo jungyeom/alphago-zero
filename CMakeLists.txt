@@ -20,6 +20,8 @@ pybind11_add_module(alphago_core
     src/board.cpp
     src/mcts.cpp
     src/parallel_mcts.cpp
+    src/node_pool.cpp
+    src/eval_thread.cpp
     src/features.cpp
     src/bindings.cpp
 )

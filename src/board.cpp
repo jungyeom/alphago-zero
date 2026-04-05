@@ -6,13 +6,16 @@
 
 namespace alphago {
 
-Board::Board(int size) : size_(size), hash_(0), move_count_(0) {
+Board::Board(int size, bool with_history) : size_(size), hash_(0), move_count_(0) {
     std::memset(grid_, 0, sizeof(grid_));
     captured_[0] = 0;
     captured_[1] = 0;
     captured_[2] = 0;
+    track_history = with_history;
     init_zobrist();
-    position_history_.insert(hash_);
+    if (with_history) {
+        position_history_.insert(hash_);
+    }
 }
 
 Board::Board(const Board& other)
@@ -43,6 +46,20 @@ Board& Board::operator=(const Board& other) {
         captured_[2] = other.captured_[2];
     }
     return *this;
+}
+
+Board Board::copy_light() const {
+    // Create with history disabled — position_history_ stays empty (zero heap alloc).
+    Board b(size_, /*with_history=*/false);
+    std::memcpy(b.grid_, grid_, sizeof(grid_));
+    std::memcpy(b.zobrist_table_, zobrist_table_, sizeof(zobrist_table_));
+    b.hash_ = hash_;
+    b.captured_[0] = captured_[0];
+    b.captured_[1] = captured_[1];
+    b.captured_[2] = captured_[2];
+    b.move_count_ = move_count_;
+    b.komi = komi;
+    return b;
 }
 
 void Board::init_zobrist() {
@@ -109,6 +126,40 @@ int Board::count_liberties(int r, int c) const {
     return static_cast<int>(find_group(r, c).liberties.size());
 }
 
+bool Board::has_liberties(int r, int c, int min_libs) const {
+    // BFS using stack-allocated arrays — zero heap allocation.
+    uint8_t color = grid_[r][c];
+    if (color == EMPTY) return true;
+
+    bool visited[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+    bool lib_visited[MAX_BOARD_SIZE][MAX_BOARD_SIZE] = {};
+
+    // Stack-allocated queue (max group size = board area)
+    std::pair<int,int> queue_buf[MAX_BOARD_SIZE * MAX_BOARD_SIZE];
+    int queue_head = 0, queue_tail = 0;
+
+    visited[r][c] = true;
+    queue_buf[queue_tail++] = {r, c};
+    int lib_count = 0;
+
+    while (queue_head < queue_tail) {
+        auto [cr, cc] = queue_buf[queue_head++];
+        auto nbrs = neighbors(cr, cc);
+        for (int i = 0; i < nbrs.count; i++) {
+            auto [nr, nc] = nbrs.data[i];
+            if (grid_[nr][nc] == EMPTY && !lib_visited[nr][nc]) {
+                lib_visited[nr][nc] = true;
+                lib_count++;
+                if (lib_count >= min_libs) return true;
+            } else if (grid_[nr][nc] == color && !visited[nr][nc]) {
+                visited[nr][nc] = true;
+                queue_buf[queue_tail++] = {nr, nc};
+            }
+        }
+    }
+    return lib_count >= min_libs;
+}
+
 int Board::place_stone(uint8_t color, int r, int c) {
     grid_[r][c] = color;
     toggle_hash(r, c, color);
@@ -120,8 +171,10 @@ int Board::place_stone(uint8_t color, int r, int c) {
     for (int i = 0; i < nbrs.count; i++) {
         auto [nr, nc] = nbrs.data[i];
         if (grid_[nr][nc] == opp) {
-            auto group = find_group(nr, nc);
-            if (group.liberties.empty()) {
+            // First check if the group has any liberties (stack-allocated, fast)
+            if (!has_liberties(nr, nc, 1)) {
+                // Group is captured — find stones to remove (need full find_group)
+                auto group = find_group(nr, nc);
                 captured_count += static_cast<int>(group.stones.size());
                 for (auto [sr, sc] : group.stones) {
                     grid_[sr][sc] = EMPTY;
@@ -145,21 +198,20 @@ bool Board::is_suicide(uint8_t color, int r, int c) const {
     for (int i = 0; i < nbrs.count; i++) {
         auto [nr, nc] = nbrs.data[i];
         if (grid_[nr][nc] == opp) {
-            auto group = find_group(nr, nc);
-            if (group.liberties.empty()) {
+            // Use has_liberties (stack-allocated BFS, no heap alloc)
+            if (!has_liberties(nr, nc, 1)) {
                 captures = true;
                 break;
             }
         }
     }
 
-    // Check own liberties
-    auto own_group = find_group(r, c);
-    bool has_liberties = !own_group.liberties.empty();
+    // Check own liberties (stack-allocated BFS)
+    bool own_has_libs = has_liberties(r, c, 1);
 
     self->grid_[r][c] = EMPTY;
 
-    return !captures && !has_liberties;
+    return !captures && !own_has_libs;
 }
 
 bool Board::is_legal(uint8_t color, Move move) const {
@@ -183,6 +235,13 @@ bool Board::is_legal(uint8_t color, Move move) const {
     if (!has_adjacent_liberty) {
         // Need full suicide check
         if (is_suicide(color, r, c)) return false;
+    }
+
+    // Skip superko check for simulation boards (no history tracking).
+    // This avoids the expensive simulate-check-undo cycle AND
+    // the vector<pair> heap allocation for captured_stones.
+    if (!track_history) {
+        return true;  // passed bounds, occupied, and suicide checks
     }
 
     // Superko check: simulate in-place, check hash, undo
@@ -229,7 +288,9 @@ void Board::play(uint8_t color, Move move) {
 
     int captured = place_stone(color, move.row, move.col);
     captured_[color] += captured;
-    position_history_.insert(hash_);
+    if (track_history) {
+        position_history_.insert(hash_);
+    }
     move_count_++;
 }
 

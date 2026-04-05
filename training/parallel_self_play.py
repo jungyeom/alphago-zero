@@ -16,19 +16,42 @@ each game uses N C++ worker threads with virtual loss + GPU batch queue,
 replacing the Python MCTS entirely.
 """
 
+import ctypes
+import gc
 import time
 import numpy as np
 import torch
 
+# Configure glibc malloc to reduce heap fragmentation from C++ MCTS threads.
+# - malloc_trim: force return of freed heap pages to OS
+# - M_MMAP_THRESHOLD: use mmap for allocations >= 32KB (mmap is instantly returned on free)
+# - M_ARENA_MAX: limit per-thread arenas to prevent unbounded growth
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    _libc.malloc_trim.argtypes = [ctypes.c_int]
+    _libc.malloc_trim.restype = ctypes.c_int
+    _libc.mallopt.argtypes = [ctypes.c_int, ctypes.c_int]
+    _libc.mallopt.restype = ctypes.c_int
+    _M_MMAP_THRESHOLD = -3
+    _M_ARENA_MAX = -8
+    _libc.mallopt(_M_MMAP_THRESHOLD, 32768)   # mmap threshold: 32KB
+    _libc.mallopt(_M_ARENA_MAX, 2)             # max 2 arenas
+    def _malloc_trim():
+        _libc.malloc_trim(0)
+except (OSError, AttributeError):
+    def _malloc_trim():
+        pass
+
 from go_engine.board import BLACK, WHITE, OPPONENT
 from go_engine.game import Game
-from model.features import board_to_features
+from model.features import board_to_features, board_to_features_cpp
 from mcts.batch_search import ParallelMCTS
 from training.config import TrainingConfig
 
 # Try to import C++ multi-threaded MCTS
 try:
-    from mcts.cpp_search import search_parallel_cpp
+    from mcts.cpp_search import search_parallel_cpp, _make_batch_eval_fn
+    import alphago_core as _ac
     _HAS_CPP_PARALLEL = True
 except (ImportError, RuntimeError):
     _HAS_CPP_PARALLEL = False
@@ -89,7 +112,24 @@ def generate_parallel_self_play(
         )
         mcts.games = games
 
+    # Pre-create C++ MCTS search + eval closure once (avoid per-move allocation)
+    if use_cpp_parallel:
+        cpp_config = _ac.MCTSConfig()
+        cpp_config.num_simulations = config.num_simulations
+        cpp_config.c_puct = config.c_puct
+        cpp_config.dirichlet_alpha = config.dirichlet_alpha
+        cpp_config.dirichlet_weight = config.dirichlet_weight
+        cpp_config.num_threads = num_threads
+        cpp_config.min_batch_size = getattr(config, 'min_batch_size', 4)
+        cpp_config.max_batch_size = getattr(config, 'max_batch_size', 16)
+        cpp_mcts = _ac.MCTSSearch(cpp_config)
+        cpp_batch_eval_fn = _make_batch_eval_fn(net, config.board_size, device)
+
+    # Use C++ feature extraction when available (avoids massive temp allocations)
+    _extract_features = board_to_features_cpp if use_cpp else board_to_features
+
     completed_games: list[dict] = []
+    games_since_cleanup = 0
     start_time = time.time()
 
     while len(completed_games) < num_games:
@@ -113,7 +153,7 @@ def generate_parallel_self_play(
         # Record features for all active games
         for i in active_indices:
             color = games[i].current_player
-            features = board_to_features(games[i].board, color)
+            features = _extract_features(games[i].board, color)
             game_data[i]["features"].append(features)
             game_data[i]["colors"].append(color)
 
@@ -121,24 +161,16 @@ def generate_parallel_self_play(
         move_results: dict[int, tuple] = {}
 
         if use_cpp_parallel:
-            # C++ multi-threaded MCTS: each game runs with N worker threads
-            min_bs = getattr(config, 'min_batch_size', 4)
-            max_bs = getattr(config, 'max_batch_size', 16)
+            # C++ multi-threaded MCTS: reuse pre-created search + eval fn
             for idx, temp in zip(active_indices, temperatures):
-                move, policy_vec = search_parallel_cpp(
-                    games[idx].board,
-                    games[idx].current_player,
-                    net,
-                    num_simulations=config.num_simulations,
-                    num_threads=num_threads,
-                    min_batch_size=min_bs,
-                    max_batch_size=max_bs,
-                    c_puct=config.c_puct,
-                    dirichlet_alpha=config.dirichlet_alpha,
-                    dirichlet_weight=config.dirichlet_weight,
-                    temperature=temp,
-                    device=device,
+                board = games[idx].board
+                cboard = board._board if hasattr(board, '_board') else board
+                result = cpp_mcts.search_parallel(
+                    cboard, games[idx].current_player,
+                    cpp_batch_eval_fn, temp,
                 )
+                move = None if result.best_move.is_pass() else (result.best_move.row, result.best_move.col)
+                policy_vec = np.array(result.policy_vec, dtype=np.float32)
                 move_results[idx] = (move, policy_vec)
         else:
             # Python batched MCTS: batch leaf evals across all games
@@ -182,6 +214,8 @@ def generate_parallel_self_play(
                     "num_moves": move_counts[i],
                 })
 
+                games_since_cleanup += 1
+
                 if verbose and len(completed_games) % 10 == 0:
                     elapsed = time.time() - start_time
                     rate = len(completed_games) / elapsed
@@ -198,6 +232,16 @@ def generate_parallel_self_play(
                 else:
                     # Mark slot as done
                     game_data[i] = {"features": [], "policies": [], "colors": []}
+
+        # Periodic cleanup to prevent memory accumulation during self-play.
+        # malloc_trim forces glibc to return freed C++ memory (MCTS tree nodes,
+        # Board copies with position_history_ sets) back to the OS.
+        if games_since_cleanup >= 10:
+            gc.collect()
+            _malloc_trim()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            games_since_cleanup = 0
 
     elapsed = time.time() - start_time
 
