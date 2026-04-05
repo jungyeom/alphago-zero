@@ -132,4 +132,81 @@ MCTSResult MCTSSearch::search_parallel(
     return result;
 }
 
+MCTSResult MCTSSearch::search_parallel_shared(
+    const Board& board,
+    uint8_t color_to_play,
+    BatchQueue& shared_queue,
+    double temperature
+) {
+    // Reset and reuse the persistent node pool
+    node_pool_.reset();
+
+    MCTSNode* root = node_pool_.alloc();
+
+    // 1. Expand root via the shared queue (blocks until evaluator processes it)
+    {
+        NetOutput root_out = shared_queue.submit(board, color_to_play);
+        expand_node_pooled(root, board, color_to_play, root_out.policy, root_out.value, node_pool_);
+    }
+
+    add_dirichlet_noise(root);
+
+    if (!root->is_expanded()) {
+        return extract_result(root, board.size(), temperature);
+    }
+
+    // 2. Simulation counter
+    std::atomic<int> sims_remaining(config_.num_simulations);
+
+    std::vector<std::atomic<int>> thread_sim_counts(config_.num_threads);
+    for (auto& c : thread_sim_counts) c.store(0);
+
+    // 3. Launch worker threads — all submit to the shared queue
+    std::vector<std::thread> workers;
+    workers.reserve(config_.num_threads);
+
+    for (int t = 0; t < config_.num_threads; t++) {
+        workers.emplace_back([&, t]() {
+            while (true) {
+                int remaining = sims_remaining.fetch_sub(1, std::memory_order_acq_rel);
+                if (remaining <= 0) break;
+
+                MCTSNode* leaf = select_with_virtual_loss(root);
+
+                uint8_t sim_color;
+                Board sim_board = reconstruct_board(
+                    leaf, root, board, color_to_play, sim_color
+                );
+
+                bool game_over = is_game_over(leaf, root);
+
+                double value;
+
+                if (game_over) {
+                    auto s = sim_board.score();
+                    value = (s.winner == BLACK) ? 1.0 : -1.0;
+                } else if (!leaf->is_expanded()) {
+                    NetOutput out = shared_queue.submit(sim_board, sim_color);
+                    expand_node_pooled_threadsafe(leaf, sim_board, sim_color, out.policy, out.value, node_pool_);
+                    value = out.value;
+                    if (sim_color == WHITE) value = -value;
+                } else {
+                    value = 0.0;
+                }
+
+                backup_with_virtual_loss(leaf, value);
+                thread_sim_counts[t].fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    // 4. Join workers
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    // 5. Extract result (no evaluator to stop — caller manages that)
+    return extract_result(root, board.size(), temperature);
+}
+
 } // namespace alphago

@@ -5,10 +5,11 @@
 #include "node_pool.h"
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 // Forward declare to avoid include cycle
-namespace alphago { class PersistentEvaluator; }
+namespace alphago { class PersistentEvaluator; class BatchQueue; }
 
 namespace alphago {
 
@@ -133,10 +134,20 @@ public:
         NodePool& pool
     );
 
+    // Shared-queue variant: caller manages the evaluator and queue.
+    // All concurrent games submit to the same queue → larger GPU batches.
+    MCTSResult search_parallel_shared(
+        const Board& board,
+        uint8_t color_to_play,
+        BatchQueue& shared_queue,
+        double temperature = 1.0
+    );
+
 private:
     MCTSConfig config_;
     NodePool node_pool_;  // Reusable pool for search_parallel
     std::unique_ptr<PersistentEvaluator> evaluator_;  // Reusable evaluator thread
+    std::mutex tree_mutex_;  // Per-instance mutex (not global!) for parallel tree ops
 
     MCTSNode* select(MCTSNode* root);
     void backup(MCTSNode* node, double value);

@@ -55,4 +55,29 @@ private:
     std::atomic<int> total_items_{0};
 };
 
+/**
+ * Shared evaluator: one BatchQueue + one PersistentEvaluator shared across
+ * multiple concurrent MCTSSearch instances.  All games' worker threads
+ * submit to the same queue → larger GPU batches → better utilization.
+ */
+class SharedEvaluator {
+public:
+    SharedEvaluator(int min_batch, int max_batch, int timeout_us);
+
+    /// Start processing. Call before launching any search_parallel_shared.
+    void start(const NetBatchEvalFn& eval_fn);
+
+    /// Stop processing. Call after all searches have joined.
+    void stop();
+
+    BatchQueue& queue() { return *queue_; }
+    int num_batches() const { return evaluator_->num_batches(); }
+    int total_items() const { return evaluator_->total_items(); }
+
+private:
+    std::unique_ptr<BatchQueue> queue_;
+    std::unique_ptr<PersistentEvaluator> evaluator_;
+    NetBatchEvalFn active_fn_;  // stored by value to keep Python callable alive
+};
+
 } // namespace alphago

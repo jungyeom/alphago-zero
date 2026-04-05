@@ -9,7 +9,6 @@
 namespace alphago {
 
 static thread_local std::mt19937 rng(42 + std::hash<std::thread::id>{}(std::this_thread::get_id()));
-static std::mutex tree_mutex;  // global mutex for tree operations in parallel mode
 
 MCTSSearch::MCTSSearch(MCTSConfig config) : config_(config), node_pool_(8192) {
     // Lazy-create evaluator on first search_parallel call
@@ -111,7 +110,7 @@ void MCTSSearch::expand_node_pooled_threadsafe(
     float value,
     NodePool& pool
 ) {
-    std::lock_guard<std::mutex> lock(tree_mutex);
+    std::lock_guard<std::mutex> lock(tree_mutex_);
     if (node->is_expanded()) {
         return;
     }
@@ -165,7 +164,7 @@ void MCTSSearch::backup(MCTSNode* node, double value) {
 // ── Virtual Loss Methods (for parallel search) ────────────────────
 
 MCTSNode* MCTSSearch::select_with_virtual_loss(MCTSNode* root) {
-    std::lock_guard<std::mutex> lock(tree_mutex);
+    std::lock_guard<std::mutex> lock(tree_mutex_);
     MCTSNode* current = root;
     while (current->is_expanded()) {
         current->virtual_loss_count++;
@@ -176,7 +175,7 @@ MCTSNode* MCTSSearch::select_with_virtual_loss(MCTSNode* root) {
 }
 
 void MCTSSearch::backup_with_virtual_loss(MCTSNode* node, double value) {
-    std::lock_guard<std::mutex> lock(tree_mutex);
+    std::lock_guard<std::mutex> lock(tree_mutex_);
     MCTSNode* current = node;
     while (current != nullptr) {
         current->virtual_loss_count--;
@@ -199,7 +198,7 @@ void MCTSSearch::expand_node_threadsafe(
     const std::vector<float>& policy,
     float value
 ) {
-    std::lock_guard<std::mutex> lock(tree_mutex);
+    std::lock_guard<std::mutex> lock(tree_mutex_);
     if (node->is_expanded()) {
         return;
     }

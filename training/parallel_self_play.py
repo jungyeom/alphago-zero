@@ -18,7 +18,9 @@ replacing the Python MCTS entirely.
 
 import ctypes
 import gc
+import queue as queue_mod
 import time
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import torch
 
@@ -112,7 +114,9 @@ def generate_parallel_self_play(
         )
         mcts.games = games
 
-    # Pre-create C++ MCTS search + eval closure once (avoid per-move allocation)
+    # Pre-create a pool of C++ MCTS search instances for concurrent game execution.
+    # All instances share a single evaluator via SharedEvaluator, so all worker
+    # threads from all games submit to one batch queue → large GPU batches.
     if use_cpp_parallel:
         cpp_config = _ac.MCTSConfig()
         cpp_config.num_simulations = config.num_simulations
@@ -122,8 +126,23 @@ def generate_parallel_self_play(
         cpp_config.num_threads = num_threads
         cpp_config.min_batch_size = getattr(config, 'min_batch_size', 4)
         cpp_config.max_batch_size = getattr(config, 'max_batch_size', 16)
-        cpp_mcts = _ac.MCTSSearch(cpp_config)
+
+        num_concurrent = getattr(config, 'num_concurrent_games', min(4, num_parallel))
+        _mcts_pool_q: queue_mod.Queue = queue_mod.Queue()
+        for _ in range(num_concurrent):
+            _mcts_pool_q.put(_ac.MCTSSearch(cpp_config))
         cpp_batch_eval_fn = _make_batch_eval_fn(net, config.board_size, device)
+        _game_executor = ThreadPoolExecutor(max_workers=num_concurrent)
+
+        # Shared evaluator: one batch queue + one evaluator thread for ALL games.
+        # This replaces per-game evaluators, giving the GPU larger batches.
+        _has_shared_eval = hasattr(_ac, 'SharedEvaluator')
+        if _has_shared_eval:
+            _shared_eval = _ac.SharedEvaluator(
+                getattr(config, 'min_batch_size', 4),
+                getattr(config, 'max_batch_size', 16),
+                100,  # timeout_us
+            )
 
     # Use C++ feature extraction when available (avoids massive temp allocations)
     _extract_features = board_to_features_cpp if use_cpp else board_to_features
@@ -161,17 +180,44 @@ def generate_parallel_self_play(
         move_results: dict[int, tuple] = {}
 
         if use_cpp_parallel:
-            # C++ multi-threaded MCTS: reuse pre-created search + eval fn
-            for idx, temp in zip(active_indices, temperatures):
-                board = games[idx].board
-                cboard = board._board if hasattr(board, '_board') else board
-                result = cpp_mcts.search_parallel(
-                    cboard, games[idx].current_player,
-                    cpp_batch_eval_fn, temp,
-                )
-                move = None if result.best_move.is_pass() else (result.best_move.row, result.best_move.col)
-                policy_vec = np.array(result.policy_vec, dtype=np.float32)
-                move_results[idx] = (move, policy_vec)
+            # C++ multi-threaded MCTS: run games concurrently using pool of
+            # MCTSSearch instances. All share a single evaluator so worker
+            # threads from ALL games feed into one batch queue → large GPU batches.
+            def _run_search(args):
+                game_idx, temp = args
+                mcts_inst = _mcts_pool_q.get()  # borrow from pool
+                try:
+                    board = games[game_idx].board
+                    cboard = board._board if hasattr(board, '_board') else board
+                    if _has_shared_eval:
+                        result = mcts_inst.search_parallel_shared(
+                            cboard, games[game_idx].current_player,
+                            _shared_eval, temp,
+                        )
+                    else:
+                        result = mcts_inst.search_parallel(
+                            cboard, games[game_idx].current_player,
+                            cpp_batch_eval_fn, temp,
+                        )
+                    move = None if result.best_move.is_pass() else (result.best_move.row, result.best_move.col)
+                    policy_vec = np.array(result.policy_vec, dtype=np.float32)
+                    return game_idx, (move, policy_vec)
+                finally:
+                    _mcts_pool_q.put(mcts_inst)  # return to pool
+
+            # Start/stop the shared evaluator around each batch of searches
+            if _has_shared_eval:
+                _shared_eval.start(cpp_batch_eval_fn)
+
+            search_args = [
+                (idx, temp)
+                for idx, temp in zip(active_indices, temperatures)
+            ]
+            for game_idx, result in _game_executor.map(_run_search, search_args):
+                move_results[game_idx] = result
+
+            if _has_shared_eval:
+                _shared_eval.stop()
         else:
             # Python batched MCTS: batch leaf evals across all games
             temp_groups: dict[float, list[int]] = {}

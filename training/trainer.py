@@ -390,6 +390,12 @@ if __name__ == "__main__":
                         help="Number of simultaneous self-play games (default: 16, try 64-128 on GPU)")
     parser.add_argument("--search-threads", type=int, default=1,
                         help="MCTS threads per game (default: 1, try 4-8 on GPU with --use-cpp)")
+    parser.add_argument("--concurrent-games", type=int, default=4,
+                        help="Games searched concurrently via thread pool (default: 4)")
+    parser.add_argument("--max-batch-size", type=int, default=32,
+                        help="Max positions per GPU batch in parallel MCTS (default: 32)")
+    parser.add_argument("--min-batch-size", type=int, default=8,
+                        help="Min positions to batch for GPU eval (default: 8)")
     args = parser.parse_args()
 
     config = TrainingConfig(
@@ -403,6 +409,9 @@ if __name__ == "__main__":
         use_cpp=args.use_cpp,
         num_parallel_games=args.parallel_games,
         num_search_threads=args.search_threads,
+        num_concurrent_games=args.concurrent_games,
+        max_batch_size=args.max_batch_size,
+        min_batch_size=args.min_batch_size,
     )
 
     train(config, resume_from=args.resume)

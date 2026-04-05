@@ -64,10 +64,10 @@ public:
             return batch;  // empty — either timeout with nothing or shutdown
         }
 
-        // If we have items but less than min_batch_size, wait a bit more
-        // for more items to arrive (but not too long)
+        // If we have items but less than min_batch_size, wait longer
+        // for more items to arrive — larger batches use GPU more efficiently
         if (static_cast<int>(queue_.size()) < min_batch_size_ && !shutdown_) {
-            auto short_wait = std::chrono::microseconds(50);
+            auto short_wait = std::chrono::microseconds(500);
             cv_producer_.wait_for(lock, short_wait, [this] {
                 return static_cast<int>(queue_.size()) >= min_batch_size_ || shutdown_;
             });
@@ -95,6 +95,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return static_cast<int>(queue_.size());
     }
+
+    int min_batch_size() const { return min_batch_size_; }
+    int max_batch_size() const { return max_batch_size_; }
+    std::chrono::microseconds timeout() const { return timeout_; }
 
 private:
     std::queue<EvalRequest> queue_;

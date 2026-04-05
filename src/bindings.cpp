@@ -134,6 +134,20 @@ PYBIND11_MODULE(alphago_core, m) {
         .def_readwrite("policy", &NetOutput::policy)
         .def_readwrite("value", &NetOutput::value);
 
+    // ── Shared Evaluator ─────────────────────────────────────────
+    py::class_<SharedEvaluator>(m, "SharedEvaluator")
+        .def(py::init<int, int, int>(),
+             py::arg("min_batch"), py::arg("max_batch"), py::arg("timeout_us") = 100)
+        .def("start", [](SharedEvaluator& self, const NetBatchEvalFn& fn) {
+            self.start(fn);
+        }, py::arg("batch_eval_fn"))
+        .def("stop", [](SharedEvaluator& self) {
+            py::gil_scoped_release release;
+            self.stop();
+        })
+        .def("num_batches", &SharedEvaluator::num_batches)
+        .def("total_items", &SharedEvaluator::total_items);
+
     // ── MCTS Search ────────────────────────────────────────────────
     py::class_<MCTSSearch>(m, "MCTSSearch")
         .def(py::init<MCTSConfig>(), py::arg("config") = MCTSConfig())
@@ -148,6 +162,12 @@ PYBIND11_MODULE(alphago_core, m) {
             py::gil_scoped_release release;
             return self.search_parallel(board, color, fn, temp);
         }, py::arg("board"), py::arg("color"), py::arg("batch_eval_fn"),
+           py::arg("temperature") = 1.0)
+        .def("search_parallel_shared", [](MCTSSearch& self, const Board& board,
+             uint8_t color, SharedEvaluator& shared_eval, double temp) -> MCTSResult {
+            py::gil_scoped_release release;
+            return self.search_parallel_shared(board, color, shared_eval.queue(), temp);
+        }, py::arg("board"), py::arg("color"), py::arg("shared_eval"),
            py::arg("temperature") = 1.0);
 
     // ── Constants ──────────────────────────────────────────────────

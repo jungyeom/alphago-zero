@@ -114,4 +114,27 @@ void PersistentEvaluator::thread_main() {
     }
 }
 
+// ── SharedEvaluator ─────────────────────────────────────────────
+
+SharedEvaluator::SharedEvaluator(int min_batch, int max_batch, int timeout_us)
+    : queue_(std::make_unique<BatchQueue>(min_batch, max_batch, timeout_us))
+    , evaluator_(std::make_unique<PersistentEvaluator>())
+{}
+
+void SharedEvaluator::start(const NetBatchEvalFn& eval_fn) {
+    active_fn_ = eval_fn;  // copy to keep alive
+    evaluator_->start(queue_.get(), &active_fn_);
+}
+
+void SharedEvaluator::stop() {
+    queue_->shutdown();
+    evaluator_->stop();
+    // Reset queue for potential reuse
+    int min_b = queue_->min_batch_size();
+    int max_b = queue_->max_batch_size();
+    auto timeout = queue_->timeout();
+    queue_ = std::make_unique<BatchQueue>(min_b, max_b, timeout.count());
+    active_fn_ = nullptr;
+}
+
 } // namespace alphago

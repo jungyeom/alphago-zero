@@ -65,7 +65,8 @@ def _make_batch_eval_fn(net: torch.nn.Module, board_size: int, device: torch.dev
 
     # Pre-allocate CPU batch buffer (reused across calls to avoid malloc churn).
     # Using numpy backing array so C++ can write directly into it via board_to_features_into.
-    max_batch = 32
+    # Pinned memory enables async CPU→GPU transfer via non_blocking=True.
+    max_batch = 64
     _np_buf = np.zeros((max_batch, NUM_FEATURES, board_size, board_size), dtype=np.float32)
     _batch_buf = torch.from_numpy(_np_buf)  # shares memory with _np_buf
     if device.type == "cuda":
